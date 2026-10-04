@@ -196,3 +196,113 @@ test("symlinked databases cannot write outside folder; invalid source text fails
   await fs.writeFile(path.join(root, "binary.ts"), Buffer.from([0xff]));
   await assert.rejects(scanSources(root), /not UTF-8/);
 });
+
+test("tokenizer text is excluded only beside a regular tokenizer marker", async (t) => {
+  const root = await fixture(t);
+  const outside = await fixture(t);
+  await write(outside, "tokenizer.json", "{}");
+  // A real tokenizer directory: the regular marker makes adjacent text artifacts non-source.
+  await write(root, "models/download/tokenizer_config.json", "{}");
+  await write(root, "models/download/merges.txt", "MERGES_TOKENIZER_ARTIFACT\n".repeat(40000));
+  await write(root, "models/download/vocab.txt", "VOCAB_TOKENIZER_ARTIFACT");
+  await write(root, "models/download/README.md", "Model readme");
+  await write(root, "models/download/parser.py", "def parse(): pass");
+  // A merges.txt with no marker beside it stays an ordinary source file.
+  await write(root, "docs/merges.txt", "DOCS_MERGES");
+  await write(root, "src/models/model.ts", "export const model = 1;");
+  // Cache directories are excluded even when their files look like sources.
+  await write(root, "hf-cache/anything.md", "HF_CACHE_ARTIFACT");
+  await write(root, ".tmp/temp.py", "TMP_ARTIFACT");
+  // A symlinked marker is not a regular file and must not trigger exclusion.
+  await write(root, "vendor/merges.txt", "VENDOR_MERGES");
+  await fs.symlink(path.join(outside, "tokenizer.json"), path.join(root, "vendor/tokenizer.json"));
+  const retained = ["docs/merges.txt", "models/download/README.md", "models/download/parser.py", "src/models/model.ts", "vendor/merges.txt"];
+  const excluded = ["models/download/merges.txt", "models/download/vocab.txt", "hf-cache/anything.md", ".tmp/temp.py"];
+  const scanned = await scanSources(root);
+  assert.deepEqual([...scanned.keys()], retained);
+  const backend = mock();
+  const result = await queryProject({ folder: root, question: "Where is the model defined?" }, backend);
+  assert.equal(result.indexed, retained.length);
+  assert.deepEqual(result.files.map((file) => file.path).sort(), retained);
+  const indexCalls = backend.calls.filter((call) => call.options.source === "query-index");
+  assert.deepEqual([...new Set(indexCalls.map((call) => call.input.path))].sort(), retained);
+  const answered = backend.calls.find((call) => call.options.source === "query-answer");
+  for (const name of excluded) {
+    assert.equal(answered.input.project_map.includes(name), false, `${name} leaked into the project map`);
+    assert.equal(indexCalls.some((call) => call.input.path === name), false, `${name} was indexed`);
+  }
+  const artifacts = ["MERGES_TOKENIZER_ARTIFACT", "VOCAB_TOKENIZER_ARTIFACT", "HF_CACHE_ARTIFACT", "TMP_ARTIFACT"];
+  for (const artifact of artifacts) assert.equal(JSON.stringify(backend.calls).includes(artifact), false, `${artifact} reached inference`);
+});
+
+test("shell and config files are indexed while launcher symlinks are skipped", async (t) => {
+  const root = await fixture(t);
+  await write(root, "start.sh", "#!/bin/sh\necho start");
+  await write(root, "env.bash", "export A=1");
+  await write(root, "settings.yaml", "key: value");
+  await write(root, "recipe.yml", "steps: []");
+  await write(root, "pyproject.toml", "[project]\nname = 'x'");
+  await fs.symlink(path.join(root, "start.sh"), path.join(root, "launcher.sh"));
+  const retained = ["env.bash", "pyproject.toml", "recipe.yml", "settings.yaml", "start.sh"];
+  const scanned = await scanSources(root);
+  assert.deepEqual([...scanned.keys()], retained);
+  const backend = mock();
+  const result = await queryProject({ folder: root, question: "How do I start this?" }, backend);
+  assert.equal(result.indexed, retained.length);
+  assert.deepEqual(result.files.map((file) => file.path).sort(), retained);
+  assert.deepEqual(rows(root).map((row) => row.path), retained);
+  assert.equal(backend.calls.some((call) => call.input.path === "launcher.sh"), false);
+});
+
+test("large files index chunks concurrently but never exceed four in-flight calls", async (t) => {
+  const root = await fixture(t);
+  const sources = new Map();
+  for (const name of ["big-a.ts", "big-b.ts", "big-c.ts"]) {
+    const content = name[4].repeat(50000);
+    assert.ok(sourceChunks(content).length > 3, `${name} must exercise multiple chunks`);
+    sources.set(name, content);
+    await write(root, name, content);
+  }
+  const calls = [];
+  const active = { now: 0, max: 0 };
+  const perPath = new Map();
+  const perPathMax = new Map();
+  const backend = {
+    complete: async (prompt, options) => {
+      const input = JSON.parse(prompt);
+      const key = input.path ?? "";
+      calls.push({ input, options });
+      active.now += 1;
+      active.max = Math.max(active.max, active.now);
+      const pathActive = (perPath.get(key) || 0) + 1;
+      perPath.set(key, pathActive);
+      perPathMax.set(key, Math.max(perPathMax.get(key) || 0, pathActive));
+      options.onUsage?.({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+      try {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (options.source === "query-answer") {
+          const names = [...input.project_map.matchAll(/^"([^"]+)" :/gm)].map((match) => match[1]);
+          return JSON.stringify({ answer: "Large files indexed.", files: names.map((name) => ({ path: name, reason: "large" })), limitations: [] });
+        }
+        if (options.source === "query-index-merge") return "merged note";
+        return `note ${input.path} ${input.part}`;
+      } finally {
+        active.now -= 1;
+        perPath.set(key, perPath.get(key) - 1);
+      }
+    },
+  };
+  const progress = [];
+  const result = await queryProject({ folder: root, question: "Index the large files.", onProgress: (text) => progress.push(text) }, backend);
+  assert.equal(result.indexed, 3);
+  assert.ok(active.max <= 4, `maxActive ${active.max} exceeded four`);
+  assert.ok(active.max > 1, "no concurrent indexing inference observed");
+  const chunkConcurrency = Math.max(...[...perPathMax].filter(([name]) => sources.has(name)).map(([, count]) => count));
+  assert.ok(chunkConcurrency > 1, "no file ran more than one chunk concurrently");
+  for (const [name, content] of sources) {
+    const chunks = calls.filter((call) => call.options.source === "query-index" && call.input.path === name).sort((a, b) => a.input.part - b.input.part);
+    assert.equal(chunks.map((call) => call.input.content).join(""), content, `${name} chunks are incomplete`);
+  }
+  assert.ok(progress.some((text) => text.includes("chunk")), `progress missing chunk: ${progress}`);
+  assert.ok(progress.some((text) => text.includes("Indexed 3/3")), `progress missing Indexed 3/3: ${progress}`);
+});

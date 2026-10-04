@@ -7,7 +7,7 @@ Folder-scoped codebase discovery with local SGLang inference. Pi's `query` tool 
 Requires Pi, Node.js 22.19+ and the existing local inference library at `~/.pi/agent/lib/local-ai.mjs`.
 
 ```sh
-pi install /home/ubuntu/src/query-engine
+pi install /home/ubuntu/src/sgai-pi/query-engine
 ```
 
 Run `/reload` in Pi after installation or code changes. The extension registers `query` as an active tool and gives it highest prompt preference for codebase discovery, before exploratory `read`, `find` or `grep`. Explicit file reads still go directly to `read`; read recommended source before editing or making exact claims. Preference is guidance, not a ban on other tools.
@@ -23,19 +23,21 @@ Tool arguments:
 
 `folder` is optional and defaults to the Pi session's working directory. Relative paths resolve from that directory. Each selected folder owns its own `query-engine.db`; selecting a subfolder creates an independent map there.
 
-The result contains the answer, recommended relative paths in reading order, reasons, approximately 200-word file summaries, source-verification limitations and sync counts. The tool also reports local token usage and indexing progress.
+The result contains the answer, recommended relative paths in reading order, reasons, approximately 200-word file summaries, source-verification limitations and sync counts. The tool also reports local token usage, completed chunk counts and completed-file indexing progress (not merely files dispatched).
 
 ## Source map and sync
 
-Eligible extensions: `py`, `js`, `md`, `ts`, `html`, `css`, `svelte`, `txt`, plus `jsx`, `mjs`, `cjs` and `tsx` (case-insensitive).
+Eligible extensions: `py`, `js`, `md`, `ts`, `html`, `css`, `svelte`, `txt`, plus `jsx`, `mjs`, `cjs`, `tsx`, `sh`, `bash`, `yaml`, `yml` and `toml` (case-insensitive).
 
-Ignored directory names: `node_modules`, `.venv`, `venv`, `.git`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `.svelte-kit`, `.next`, `dist`, `build` and `coverage`. Symlinked files and directories are skipped. There is no additional Git-ignore filtering. Non-UTF-8 or binary files with eligible extensions fail explicitly rather than disappearing from the map.
+Ignored directory names: `node_modules`, `.venv`, `venv`, `.git`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `.svelte-kit`, `.next`, `dist`, `build`, `coverage`, `hf-cache` and `.tmp`. Symlinked files and directories are skipped. There is no additional Git-ignore filtering. Non-UTF-8 or binary files with eligible extensions fail explicitly rather than disappearing from the map.
+
+`merges.txt` and `vocab.txt` are excluded only when the same directory contains a regular `tokenizer_config.json` or `tokenizer.json`. These are downloaded tokenizer data, not source. Model README files, custom Python code and ordinary `src/models/` directories remain eligible; a symlinked tokenizer marker does not trigger exclusion. This avoids dozens of pointless inference calls for a large tokenizer table without hiding model documentation.
 
 Every tool call:
 
 1. Checks the local endpoint and exact served model.
 2. Scans all eligible files recursively and hashes their full contents with SHA-256.
-3. Reuses unchanged summaries; summarizes added or changed files with four concurrent workers. Large files are consumed completely in UTF-8-safe chunks, then their notes are recursively merged into one summary. Approximately 200 words is a sizing hint, not a clipping limit.
+3. Reuses unchanged summaries; summarizes added or changed files with four concurrent workers. Large files are consumed completely in UTF-8-safe chunks, summarized concurrently, then their notes are recursively merged in source order into one summary. All file/chunk/merge workers share a four-request inference limit, so a large file does not become a sequential bottleneck or multiply the server's workload. Approximately 200 words is a sizing hint, not a clipping limit.
 4. Re-scans for source changes, then commits additions, changes and deletions in one SQLite transaction. Failed syncs preserve the previous complete index but never answer from it.
 5. Sends **every** indexed path and summary to SGLang, sorted alphabetically with SQLite binary collation:
 
@@ -92,11 +94,11 @@ The first query indexes the whole folder and can be slow; later calls reuse summ
 ## Verification
 
 ```sh
-cd /home/ubuntu/src/query-engine
+cd /home/ubuntu/src/sgai-pi/query-engine
 npm test
 ```
 
-Runs the engine regression suite and a real Pi resource-loader/session integration test backed by a mock SGLang HTTP/SSE server and the real `LocalAI` library. It verifies schema, filtering, alphabetical completeness, incremental sync, rollback, Unicode chunking, source races, invalid recommendations, cancellation, default tool activation and preference in the model's system prompt. The integration test locates the installed Pi SDK locally; no duplicate host packages are bundled.
+Runs the engine regression suite and a real Pi resource-loader/session integration test backed by a mock SGLang HTTP/SSE server and the real `LocalAI` library. It verifies schema, filtering (including megabyte tokenizer tables), shell/config discovery, alphabetical completeness, incremental sync, rollback, lossless Unicode chunking, parallel chunk indexing with a shared four-call limit, completed-file progress, source races, invalid recommendations, cancellation, default tool activation and preference in the model's system prompt. The integration test locates the installed Pi SDK locally; no duplicate host packages are bundled.
 
 With real SGLang running, the optional live check indexes a temporary project, answers a question, changes/adds/deletes files and verifies another query:
 
@@ -105,3 +107,5 @@ npm run test:live
 ```
 
 The live check fails if inference is unavailable; it never substitutes a mock. Passing mock tests does not establish real-model answer quality or latency.
+
+Measured locally against `sglang-server` with Granite on an RTX 4060 Laptop GPU: a fresh copy of the nine eligible files, including the excluded tokenizer table, indexed and answered in 28.46 seconds; a subsequent unchanged query took 2.54 seconds (3.72 seconds against the original cached folder). The 916,646-byte tokenizer merge table previously required 58 chunk-summary calls; it now requires none. These are individual observations, not latency guarantees or an end-to-end before/after speedup ratio. A separate fresh-index trial omitted `start.sh` from its recommendations and failed a quality assertion, although another recommended it: answer relevance remains model-dependent and requires source verification.
