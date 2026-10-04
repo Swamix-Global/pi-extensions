@@ -1,0 +1,19 @@
+{
+  "name": "pi-query-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "test": "node --test tests/query-engine.test.mjs && npm run test:extension",
+    "test:extension": "node tests/extension.test.mjs",
+    "test:live": "node --test tests/live.test.mjs"
+  },
+  "pi": {
+    "extensions": ["extensions/sgai-query.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

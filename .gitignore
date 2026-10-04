@@ -1,0 +1,4 @@
+node_modules/
+query-engine.db
+query-engine.db-wal
+query-engine.db-shm
