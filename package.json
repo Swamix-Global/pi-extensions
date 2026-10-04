@@ -1,11 +1,12 @@
 {
   "name": "pi-query-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": { "node": ">=22.19.0" },
   "scripts": {
-    "test": "node --test tests/query-engine.test.mjs && npm run test:extension",
+    "test": "node --test tests/query-engine.test.mjs tests/index-plan.test.mjs tests/cli.test.mjs && npm run test:extension",
+    "query": "node cli.mjs",
     "test:extension": "node tests/extension.test.mjs",
     "test:live": "node --test tests/live.test.mjs"
   },

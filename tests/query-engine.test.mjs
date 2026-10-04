@@ -3,8 +3,13 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { test, after } from "node:test";
 import { queryProject, scanSources, sourceChunks } from "../lib/query-engine.mjs";
+import { indexLocation } from "../lib/index-store.mjs";
+
+const store = await fs.mkdtemp(path.join(os.tmpdir(), "query-test-store-"));
+process.env.PI_QUERY_STORE_DIR = store;
+after(() => fs.rm(store, { recursive: true, force: true }));
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "query-engine-test-"));
@@ -17,7 +22,7 @@ async function write(root, name, content) {
   await fs.writeFile(file, content);
 }
 function rows(root) {
-  const db = new DatabaseSync(path.join(root, "query-engine.db"));
+  const db = new DatabaseSync(indexLocation(root).database);
   try {
     return db.prepare("SELECT * FROM files ORDER BY path").all().map((row) => ({ ...row }));
   } finally {
@@ -52,7 +57,10 @@ test("exact one-to-one map, alphabetical order, exclusions and folder ownership"
   const backend = mock();
   const result = await queryProject({ folder: root, question: "Explain project" }, backend);
   assert.equal(result.indexed, 8);
-  assert.equal(result.database, path.join(root, "query-engine.db"));
+  assert.equal(result.database, indexLocation(root).database);
+  assert.equal((await fs.readdir(root)).includes("query-engine.db"), false);
+  assert.equal((await fs.stat(store)).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(result.database)).mode & 0o777, 0o600);
   assert.equal((await fs.readdir(outside)).includes("query-engine.db"), false);
   const indexed = rows(root);
   const map = backend.calls.at(-1).input.project_map;
@@ -184,15 +192,16 @@ test("pre-aborted and offline calls do not index or use old context", async (t) 
   assert.equal((await fs.readdir(root)).includes("query-engine.db"), false);
 });
 
-test("symlinked databases cannot write outside folder; invalid source text fails explicitly", async (t) => {
+test("symlinked global databases cannot write outside store; invalid source text fails explicitly", async (t) => {
   const root = await fixture(t);
   const outside = await fixture(t);
   const target = path.join(outside, "database");
   await fs.writeFile(target, "untouched");
-  await fs.symlink(target, path.join(root, "query-engine.db"));
-  await assert.rejects(queryProject({ folder: root, question: "test" }, mock()), /ELOOP/);
+  const database = indexLocation(root).database;
+  await fs.symlink(target, database);
+  await assert.rejects(queryProject({ folder: root, question: "test" }, mock()), /Unsafe index|ELOOP/);
   assert.equal(await fs.readFile(target, "utf8"), "untouched");
-  await fs.unlink(path.join(root, "query-engine.db"));
+  await fs.unlink(database);
   await fs.writeFile(path.join(root, "binary.ts"), Buffer.from([0xff]));
   await assert.rejects(scanSources(root), /not UTF-8/);
 });

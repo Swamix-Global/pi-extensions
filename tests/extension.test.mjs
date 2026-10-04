@@ -50,6 +50,7 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   process.env.SETTINGS_SUBAGENTX_PATH = path.join(root, "settings.json");
   process.env.LOCALAI_DB_PATH = path.join(root, "usage.db");
+  process.env.PI_QUERY_STORE_DIR = path.join(root, "indexes");
   await fs.writeFile(process.env.SETTINGS_SUBAGENTX_PATH, JSON.stringify({
     localBackendUrl: `http://127.0.0.1:${server.address().port}/v1`,
     localModel: model, localMaxTokens: 4096, reasoningEffort: "low",
@@ -76,6 +77,13 @@ try {
   assert.equal(tool.name, "query");
   assert.ok(tool.promptGuidelines[0].includes("highest preference"));
   assert.ok(tool.outputSchema);
+  assert.ok(tool.parameters.required.includes("folder"));
+  const preview = await tool.execute("dry", { folder: "project", dryRun: true }, undefined, undefined, { cwd: root });
+  assert.equal(preview.structuredContent.dryRun, true);
+  assert.deepEqual(preview.structuredContent.pending.added, ["demo.ts"]);
+  assert.equal(requests.length, 0);
+  await assert.rejects(fs.stat(process.env.PI_QUERY_STORE_DIR), { code: "ENOENT" });
+  await assert.rejects(tool.execute("missing", { question: "where?" }, undefined, undefined, { cwd: root }), /folder/i);
   const { session } = await createAgentSession({
     cwd: root,
     agentDir: path.join(root, "agent"),
@@ -105,11 +113,11 @@ try {
   assert.deepEqual(schema.required, ["answer", "files", "limitations"]);
   assert.deepEqual(schema.properties.files.items.properties.path.enum, ["demo.ts"], "grammar must restrict paths to the actual source map");
   assert.ok(progress.length >= 3);
-  const second = await tool.execute("second", { question: "Explain handler" }, new AbortController().signal, undefined, { cwd: folder });
+  const second = await tool.execute("second", { folder: ".", question: "Explain handler" }, new AbortController().signal, undefined, { cwd: folder });
   assert.equal(second.structuredContent.sync.updated, 0);
   assert.equal(requests.length, 3);
   await fs.writeFile(process.env.SETTINGS_SUBAGENTX_PATH, JSON.stringify({ localBackendUrl: "https://example.com/v1" }));
-  await assert.rejects(tool.execute("remote", { question: "No uploads" }, undefined, undefined, { cwd: folder }), /loopback/);
+  await assert.rejects(tool.execute("remote", { folder: ".", question: "No uploads" }, undefined, undefined, { cwd: folder }), /loopback/);
   console.log("query extension integration OK (mock SGLang, real LocalAI, registration, preference, usage and folder scope)");
 } finally {
   await new Promise((resolve) => server.close(resolve));
