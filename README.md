@@ -1,9 +1,9 @@
 # Query Engine for Pi
 
 `query` discovers relevant code and files using a complete, alphabetically sorted
-map of source summaries, answered by local SGLang. **Pass `folder` explicitly.**
-Indexes live under Pi, not in the source tree. Preview indexing with an offline,
-read-only dry run before a large first query.
+map of source summaries, answered by local SGLang running Nemotron-3-Nano-4B-FP8.
+**Pass `folder` explicitly.** Indexes live under Pi, not in the source tree.
+Preview indexing with an offline, read-only dry run before a large first query.
 
 Summaries are discovery context, **not exact source evidence**. Read the recommended
 files before editing or making exact claims. Model relevance is not guaranteed.
@@ -14,8 +14,8 @@ files before editing or making exact claims. Model relevance is not guaranteed.
 - Pi for the extension; the standalone CLI does not need a running Pi session.
 - Normal queries: `~/.pi/agent/lib/local-ai.mjs`, local model settings in
   `~/.pi/agent/settings-subagentx.json`, and healthy SGLang serving exactly
-  `granite-4.2-3b-fp8` at the configured loopback endpoint (normally
-  `http://127.0.0.1:30000/v1`). No remote inference fallback.
+  `nemotron-3-nano-4b-fp8` at the loopback endpoint (`http://127.0.0.1:30000/v1`).
+  No remote inference fallback.
 - Dry runs: filesystem access and Node only; no model, configuration or network
   connection is required.
 
@@ -33,7 +33,7 @@ Normal query:
 ```json
 {
   "folder": "/home/ubuntu/src/sglang-server",
-  "question": "Where is model inventory configured and which files document selected SGLang models?"
+  "question": "Where is model inventory configured and which files document the selected SGLang model?"
 }
 ```
 

@@ -24,7 +24,7 @@ const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManag
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "query-extension-test-"));
 const requests = [];
-const model = "granite-4.2-3b-fp8";
+const model = "nemotron-3-nano-4b-fp8";
 const server = createServer((request, response) => {
   if (request.url === "/v1/models") {
     response.setHeader("content-type", "application/json");
@@ -116,9 +116,16 @@ try {
   const second = await tool.execute("second", { folder: ".", question: "Explain handler" }, new AbortController().signal, undefined, { cwd: folder });
   assert.equal(second.structuredContent.sync.updated, 0);
   assert.equal(requests.length, 3);
+  const beforeLegacy = requests.length;
+  await fs.writeFile(process.env.SETTINGS_SUBAGENTX_PATH, JSON.stringify({
+    localBackendUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    localModel: "granite-4.2-3b-fp8",
+  }));
+  await assert.rejects(tool.execute("legacy", { folder: ".", question: "Refuse the retired model" }, undefined, undefined, { cwd: folder }), /Unsupported local model/);
+  assert.equal(requests.length, beforeLegacy, "a retired model must be refused before any backend call");
   await fs.writeFile(process.env.SETTINGS_SUBAGENTX_PATH, JSON.stringify({ localBackendUrl: "https://example.com/v1" }));
   await assert.rejects(tool.execute("remote", { folder: ".", question: "No uploads" }, undefined, undefined, { cwd: folder }), /loopback/);
-  console.log("query extension integration OK (mock SGLang, real LocalAI, registration, preference, usage and folder scope)");
+  console.log("query extension integration OK (mock SGLang, real LocalAI, registration, preference, usage, model gate and folder scope)");
 } finally {
   await new Promise((resolve) => server.close(resolve));
   await fs.rm(root, { recursive: true, force: true });
