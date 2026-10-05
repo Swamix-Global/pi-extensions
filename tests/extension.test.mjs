@@ -24,7 +24,7 @@ const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManag
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "query-extension-test-"));
 const requests = [];
-const model = "nemotron-3-nano-4b-fp8";
+const model = "granite-4.2-3b-awq";
 const server = createServer((request, response) => {
   if (request.url === "/v1/models") {
     response.setHeader("content-type", "application/json");
@@ -53,7 +53,7 @@ try {
   process.env.PI_QUERY_STORE_DIR = path.join(root, "indexes");
   await fs.writeFile(process.env.SETTINGS_SUBAGENTX_PATH, JSON.stringify({
     localBackendUrl: `http://127.0.0.1:${server.address().port}/v1`,
-    localModel: model, localMaxTokens: 4096, reasoningEffort: "low",
+    localModel: model, localMaxTokens: 8192, reasoningEffort: "low",
   }));
   const folder = path.join(root, "project");
   await fs.mkdir(folder);
@@ -106,7 +106,7 @@ try {
   assert.ok(result.content[0].text.includes("Demo module exports handler"));
   assert.equal(result.usage.totalTokens, 60);
   assert.equal(requests.length, 2);
-  assert.ok(requests.every((body) => body.model === model && body.chat_template_kwargs.enable_thinking === false && body.reasoning_effort === "low"));
+  assert.ok(requests.every((body) => body.model === model && body.chat_template_kwargs.enable_thinking === true && body.reasoning_effort === "low" && body.max_tokens === 8192));
   assert.equal(requests[0].response_format, undefined, "summaries remain plain text");
   assert.equal(requests[1].response_format.type, "json_schema", "answer must use constrained output");
   const schema = requests[1].response_format.json_schema.schema;

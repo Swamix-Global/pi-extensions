@@ -1,7 +1,7 @@
 # Query Engine for Pi
 
 `query` discovers relevant code and files using a complete, alphabetically sorted
-map of source summaries, answered by local SGLang running Nemotron-3-Nano-4B-FP8.
+map of source summaries, answered by local SGLang running Granite-4.2-3B AWQ Marlin.
 **Pass `folder` explicitly.** Indexes live under Pi, not in the source tree.
 Preview indexing with an offline, read-only dry run before a large first query.
 
@@ -14,7 +14,9 @@ files before editing or making exact claims. Model relevance is not guaranteed.
 - Pi for the extension; the standalone CLI does not need a running Pi session.
 - Normal queries: `~/.pi/agent/lib/local-ai.mjs`, local model settings in
   `~/.pi/agent/settings-subagentx.json`, and healthy SGLang serving exactly
-  `nemotron-3-nano-4b-fp8` at the loopback endpoint (`http://127.0.0.1:30000/v1`).
+  `granite-4.2-3b-awq` at the loopback endpoint (`http://127.0.0.1:30000/v1`).
+  Preferred profile: thinking enabled, low reasoning, 8192-token output safety cap;
+  general grounding, reasoning and adversarial review are hardcoded in LocalAI.
   No remote inference fallback.
 - Dry runs: filesystem access and Node only; no model, configuration or network
   connection is required.
