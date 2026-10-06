@@ -12,6 +12,7 @@ from pathlib import Path
 from .store import location, open_index, pending_files, read_index, read_rows
 from .models import (SUMMARY_SYSTEM, HIERARCHY_SYSTEM, QUERY_SYSTEM, budget,
                      decision_client, encode, local_client, tokens)
+from . import qdrant
 
 SOURCE_EXTENSIONS = set(".py .js .jsx .mjs .cjs .md .ts .tsx .html .css .svelte .txt .sh .bash .yaml .yml .toml".split())
 IGNORED_DIRECTORIES = set("node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache .ruff_cache .cache .svelte-kit .next dist build coverage hf-cache .tmp".split())
@@ -222,6 +223,54 @@ def sync_index(root, database, local, progress):
         except BaseException:
             db.execute("ROLLBACK")
             raise
+    # 4. Synchronize with Qdrant Hybrid vector store if available
+    try:
+        if qdrant.is_qdrant_alive():
+            col_name = qdrant.collection_name_for_folder(root)
+            qdrant.ensure_collection(col_name)
+            qdrant_points = qdrant.get_indexed_points(col_name)
+
+            points_to_update = [
+                row for row in rows.values()
+                if row["path"] not in qdrant_points or qdrant_points[row["path"]].get("content_hash") != row["content_hash"]
+            ]
+            points_to_delete = [
+                pt["id"] for p, pt in qdrant_points.items()
+                if p not in rows and pt.get("id")
+            ]
+
+            if points_to_delete:
+                qdrant.delete_points(col_name, points_to_delete)
+
+            if points_to_update:
+                upsert_batch = []
+                for row in points_to_update:
+                    rel_p = row["path"]
+                    file_info = files.get(rel_p, {})
+                    content = file_info.get("content", "")
+                    code_meta = qdrant.extract_code_metadata(rel_p, content)
+                    d_vec, s_vec = qdrant.build_doc_tokens(rel_p, row["summary"], code_meta["symbols"])
+                    pt_id = qdrant.uuid_for_path(root, rel_p)
+                    upsert_batch.append({
+                        "id": pt_id,
+                        "vector": {"dense": d_vec, "sparse": s_vec},
+                        "payload": {
+                            "folder": root,
+                            "path": rel_p,
+                            "summary": row["summary"],
+                            "content_hash": row["content_hash"],
+                            "index_time": row["index_time"],
+                            "language": code_meta["language"],
+                            "lines": code_meta["lines"],
+                            "bytes": code_meta["bytes"],
+                            "symbols": code_meta["symbols"],
+                            "imports": code_meta["imports"]
+                        }
+                    })
+                qdrant.upsert_points(col_name, upsert_batch)
+    except Exception as e:
+        progress(f"Qdrant sync skipped or failed non-fatally: {e}")
+
     return files, list(rows.values()), {"updated": len(changed), "deleted": len(pending["deleted"]), "unchanged": len(pending["unchanged"])}
 
 
