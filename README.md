@@ -217,3 +217,11 @@ Unit tests use disposable projects and fake model responses. Live tests use a
 fresh temporary store and check actual local summaries, incremental sync and
 read-only planning. A skipped OpenRouter stage does **not** establish remote
 health, decision accuracy or end-to-end live success.
+
+## Folder Indexer & Qdrant Service
+
+The query engine now integrates a per-folder indexer with the local Qdrant service (`http://127.0.0.1:6333`):
+- **Native `.gitignore` Compliance**: Leverages `git check-ignore` to dynamically filter out ignored directories (`venv/`, `models/`, `hf-cache/`, etc.) and files in sub-millisecond time.
+- **Auto-Discovery of Agent Folders**: Discovers all project folders containing `AGENTS.md` (case-insensitive) across workspaces (`--auto-all`).
+- **Incremental Sync**: Uses SHA-256 byte hashing against cached state. Only new or modified files are processed.
+- **Qdrant Vector Collections**: Syncs vectors into deterministic per-folder collections (`folder_<sha256>`).

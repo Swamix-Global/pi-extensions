@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timezone
@@ -25,24 +26,75 @@ def canonical(folder):
     return str(root)
 
 
-def scan_sources(root):
+def is_git_repo(root: Path) -> bool:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=2.0
+        )
+        return res.returncode == 0 and res.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
+def filter_git_ignored_dirs(root: Path, dir_names: list[str], parent_rel: str = "") -> set[str]:
+    if not dir_names:
+        return set()
+    queries = [f"{parent_rel}/{d}/" if parent_rel else f"{d}/" for d in dir_names]
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--stdin"],
+            input="\n".join(queries),
+            capture_output=True, text=True, timeout=2.0
+        )
+        ignored_lines = set(proc.stdout.splitlines())
+        ignored_names = set()
+        for q, d in zip(queries, dir_names):
+            if q in ignored_lines or q.rstrip("/") in ignored_lines:
+                ignored_names.add(d)
+        return ignored_names
+    except Exception:
+        return set()
+
+
+def scan_sources(root, respect_gitignore: bool = True):
+    root_path = Path(root).resolve(strict=True)
+    in_git = is_git_repo(root_path) if respect_gitignore else False
     files = {}
+
     def walk(directory):
         entries = sorted(os.scandir(directory), key=lambda e: e.name)
         tokenizer = any(e.name in ("tokenizer.json", "tokenizer_config.json")
                         and e.is_file(follow_symlinks=False) for e in entries)
+
+        subdirs = []
         for entry in entries:
             if entry.is_symlink():
                 continue
             if entry.is_dir(follow_symlinks=False):
                 if entry.name not in IGNORED_DIRECTORIES:
-                    walk(entry.path)
-            elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in SOURCE_EXTENSIONS:
+                    subdirs.append(entry.name)
+
+        if in_git and subdirs:
+            parent_rel = Path(directory).relative_to(root_path).as_posix()
+            if parent_rel == ".":
+                parent_rel = ""
+            ignored_subdirs = filter_git_ignored_dirs(root_path, subdirs, parent_rel)
+            subdirs = [d for d in subdirs if d not in ignored_subdirs]
+
+        for d_name in subdirs:
+            walk(os.path.join(directory, d_name))
+
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in SOURCE_EXTENSIONS:
                 if tokenizer and entry.name in ("merges.txt", "vocab.txt"):
                     continue
                 path = Path(entry.path)
                 if path.resolve() != path:
                     raise RuntimeError(f"Source path changed: {path}")
+                rel_name = path.relative_to(root_path).as_posix()
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
                 with os.fdopen(fd, "rb") as handle:
                     if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
@@ -51,10 +103,28 @@ def scan_sources(root):
                 content = raw.decode("utf-8")
                 if "\0" in content:
                     raise ValueError(f"Source contains binary data: {path}")
-                name = path.relative_to(root).as_posix()
-                files[name] = {"path": name, "content": content,
-                               "content_hash": hashlib.sha256(raw).hexdigest()}
-    walk(root)
+                files[rel_name] = {
+                    "path": rel_name,
+                    "content": content,
+                    "content_hash": hashlib.sha256(raw).hexdigest()
+                }
+
+    walk(root_path)
+
+    if in_git and files:
+        candidate_paths = list(files.keys())
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root_path), "check-ignore", "--stdin"],
+                input="\n".join(candidate_paths),
+                capture_output=True, text=True, timeout=5.0
+            )
+            ignored_files = set(proc.stdout.splitlines())
+            for ign in ignored_files:
+                files.pop(ign, None)
+        except Exception:
+            pass
+
     return dict(sorted(files.items()))
 
 
@@ -158,8 +228,6 @@ def sync_index(root, database, local, progress):
 def hierarchy(rows, local, progress):
     """Generalizable H1/H2 parts. Cache keyed by entire map plus model/budget."""
     state = lambda group: {"file_summaries": group}
-    # A single verbose summary can exceed a window. Split its text losslessly,
-    # retaining the exact path and explicit fragment markers in every piece.
     fragments = []
     limit = budget(local.context, HIERARCHY_SYSTEM, local.output)
     for row in rows:
@@ -181,7 +249,6 @@ def hierarchy(rows, local, progress):
         marker = f"{i + 1}/{len(groups)}"
         progress(f"Preparing map {marker}")
         text = local.complete(state(group), HIERARCHY_SYSTEM)
-        # Enforce representation independent of model Markdown compliance.
         parts.append({"part": marker, "overview": f"# Project map {marker}\n\n## Summary\n{text}",
                       "paths": [r["path"] for r in group]})
     return parts
@@ -219,7 +286,6 @@ def decide(question, rows, parts, remote):
         state = make(group)
         state["part"] = f"{i + 1}/{len(groups)}"
         results.append(parse_decision(remote.complete(state, QUERY_SYSTEM, structured=True), allowed))
-    # Bounded reduction: all intermediate decisions participate, not just top-k.
     while len(results) > 1:
         state = lambda group: {"question": question, "decisions": group}
         batches = pack(results, state, remote, QUERY_SYSTEM)
@@ -250,7 +316,6 @@ def query_project(folder, question=None, dry_run=False, index_only=False,
     local.check()
     files, rows, sync = sync_index(root, database, local, progress)
     result = {"dryRun": False, "folder": root, "database": str(database), "indexed": len(rows), "sync": sync}
-    # Small maps retain the complete file summaries. Oversized maps become 400-word H1/H2 parts.
     map_parts = [{"part": "1/1", "overview": "# Project map 1/1\n\n## File summaries",
                   "files": [{"path": r["path"], "summary": r["summary"]} for r in rows],
                   "paths": [r["path"] for r in rows]}]
@@ -258,7 +323,6 @@ def query_project(folder, question=None, dry_run=False, index_only=False,
     limit = budget(target.context, QUERY_SYSTEM, target.output)
     oversized = tokens(encode({"question": question or "", "parts": map_parts, "part": "1/1"})) > limit
     if oversized:
-        # Persist derived parts separately; file-summary schema and mechanism remain unchanged.
         signature = hashlib.sha256(encode({"rows": rows, "model": local.model, "context": local.context}).encode()).hexdigest()
         with closing(open_index(root, database)) as db:
             db.execute("CREATE TABLE IF NOT EXISTS map_cache (signature TEXT PRIMARY KEY, parts TEXT NOT NULL)")
