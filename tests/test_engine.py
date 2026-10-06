@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from query_engine.engine import (scan_sources, source_chunks, query_project, plan_project,
                                  pack, parse_decision, hierarchy, decide)
-from query_engine.models import Client, budget, encode, tokens, QUERY_SYSTEM
+from query_engine.models import Client, budget, encode, tokens, QUERY_SYSTEM, project_api_key
 from query_engine.store import location, open_index, read_index
 
 
@@ -59,6 +59,19 @@ class EngineTests(unittest.TestCase):
     def query(self, **kwargs):
         return query_project(str(self.root), "Find addition", store_dir=str(self.store),
                              local=self.local, remote=self.remote, **kwargs)
+
+    def test_project_key_environment_precedence(self):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "process-key"}), patch("pathlib.Path.read_text", side_effect=AssertionError):
+            self.assertEqual(project_api_key(), "process-key")
+
+    def test_project_key_from_installation_env(self):
+        with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.exists", return_value=True), patch("pathlib.Path.read_text", return_value='# private\nOPENROUTER_API_KEY="copied-key"\n') as read:
+            self.assertEqual(project_api_key(), "copied-key")
+            read.assert_called_once_with()
+
+    def test_missing_project_key(self):
+        with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.exists", return_value=False):
+            self.assertIsNone(project_api_key())
 
     def test_dry_run_no_writes_or_clients(self):
         with patch("query_engine.engine.local_client", side_effect=AssertionError), patch("query_engine.engine.decision_client", side_effect=AssertionError):

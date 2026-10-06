@@ -58,7 +58,7 @@ query-decision implementation. Source files are never edited by the query tool.
 
 | Variable | Default / meaning |
 | --- | --- |
-| `OPENROUTER_API_KEY` | Required for remote decisions only; never persisted |
+| `OPENROUTER_API_KEY` | Required for remote decisions; process environment first, then installation `.env` |
 | `QUERY_DECISION_MODEL` | `openrouter/free`; alternatively an explicit model ending in `:free` |
 | `QUERY_DECISION_CONTEXT` | Conservative 32768-token cap, reduced if `/models` advertises a smaller window |
 | `QUERY_SGLANG_URL` | Settings `localBackendUrl`, otherwise `http://127.0.0.1:30000/v1`; loopback enforced |
@@ -67,6 +67,13 @@ query-decision implementation. Source files are never edited by the query tool.
 | `SETTINGS_SUBAGENTX_PATH` | `~/.pi/agent/settings-subagentx.json` for local model/URL defaults |
 | `PI_QUERY_STORE_DIR` | Whole store override, absolute or relative to process cwd |
 | `PI_CODING_AGENT_DIR` | Agent directory override; default `~/.pi/agent` |
+
+The engine automatically reads `OPENROUTER_API_KEY` from `.env` beside `cli.py`
+when absent from the process environment, including when launched by Pi from
+another directory. It never reads credentials from the queried folder or executes
+`.env` as shell code. Keep this file private (`chmod 600 .env`); it is Git-ignored.
+A copied Pi credential is a snapshot: replace it if revoked or rotated. Pi's
+original auth stays intact; the engine does not refresh Pi OAuth credentials.
 
 `openrouter/free` selects among available free models, rather than promising a
 specific Jev model. Only free router / `:free` IDs are allowed: no automatic paid

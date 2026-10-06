@@ -114,8 +114,33 @@ def local_client():
                   int(os.environ.get("QUERY_LOCAL_CONTEXT", "32768")))
 
 
-def decision_client():
+def project_api_key():
+    """Read only the OpenRouter key from this installation, never the queried folder.
+
+    Process environment takes precedence. No shell expansion or dotenv execution.
+    """
     key = os.environ.get("OPENROUTER_API_KEY")
+    if key:
+        return key
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if not env_file.exists():
+        return None
+    for line in env_file.read_text().splitlines():
+        name, separator, value = line.strip().partition("=")
+        if separator and name.strip() == "OPENROUTER_API_KEY":
+            value = value.strip()
+            if value.startswith('"'):
+                value = json.loads(value)
+            elif len(value) >= 2 and value[0] == value[-1] == "'":
+                value = value[1:-1]
+            if not isinstance(value, str):
+                raise ValueError("OPENROUTER_API_KEY must be a string")
+            return value or None
+    return None
+
+
+def decision_client():
+    key = project_api_key()
     if not key:
         raise ValueError("OPENROUTER_API_KEY required for decisions; use --index-only for local indexing")
     model = os.environ.get("QUERY_DECISION_MODEL", "openrouter/free")
