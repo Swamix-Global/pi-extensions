@@ -1,4 +1,7 @@
 node_modules/
+__pycache__/
+*.py[cod]
+.venv/
 query-engine.db
 query-engine.db-wal
 query-engine.db-shm

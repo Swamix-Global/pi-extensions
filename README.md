@@ -1,238 +1,212 @@
-# Query Engine for Pi
+# Python Query Engine for Pi
 
-`query` discovers relevant code and files using a complete, alphabetically sorted
-map of source summaries, answered by local SGLang running Granite-4.2-3B AWQ Marlin.
-**Pass `folder` explicitly.** Indexes live under Pi, not in the source tree.
-Preview indexing with an offline, read-only dry run before a large first query.
+A standard-library Python engine and CLI, with a thin TypeScript adapter required
+by Pi. SGLang indexes **all eligible files** locally; an OpenRouter **free** model
+makes Jev-style structured decisions from a simple JSON state. There is no agent
+framework, hidden tool loop, embedding store, top-k map retrieval or stale fallback.
 
-Summaries are discovery context, **not exact source evidence**. Read the recommended
-files before editing or making exact claims. Model relevance is not guaranteed.
+**Data boundary:** raw source text goes only to loopback SGLang. Normal queries
+send file paths, summaries and your question to OpenRouter. Summaries may expose
+sensitive source information. `--index-only` and `--dry-run` never use OpenRouter.
+Summary recommendations are discovery context, not exact source evidence: read
+recommended files before editing or making exact claims.
 
-## Requirements and installation
+## Run
 
-- Node.js **22.19+** (`node:sqlite`).
-- Pi for the extension; the standalone CLI does not need a running Pi session.
-- Normal queries: `~/.pi/agent/lib/local-ai.mjs`, local model settings in
-  `~/.pi/agent/settings-subagentx.json`, and healthy SGLang serving exactly
-  `granite-4.2-3b-awq` at the loopback endpoint (`http://127.0.0.1:30000/v1`).
-  Preferred profile: thinking enabled, low reasoning, 8192-token output safety cap;
-  general grounding, reasoning and adversarial review are hardcoded in LocalAI.
-  No remote inference fallback.
-- Dry runs: filesystem access and Node only; no model, configuration or network
-  connection is required.
+Python 3.10+ is sufficient for the standalone engine; no pip dependencies. Pi's
+adapter also requires its normal Node runtime and supplied SDK packages.
+
+```sh
+python3 -B cli.py --folder /project --dry-run --json
+python3 -B cli.py --folder /project --index-only
+export OPENROUTER_API_KEY='your-key'
+python3 -B cli.py --folder /project --question 'Where is authentication checked?'
+```
+
+`--index-only` preindexes every eligible file into the durable summary store and
+prepares hierarchical map parts when the map exceeds the configured local window.
+SGLang processes sources and hierarchy generation; its automatic prefix/KV cache
+is evictable and does not survive restart. This is **not** a claim that an entire
+project permanently resides in GPU memory. Unchanged file summaries and derived
+hierarchy parts are reused from SQLite.
+
+`--json` emits one result document on stdout; progress goes to stderr. Execution
+failure emits `{"error":"..."}` with exit 1. Argument errors exit 2. Explicit
+nonblank `--folder` is always required; `--question` is required for normal queries.
+CLI-relative folders resolve from the shell cwd. CLI dry runs disable bytecode writes.
+
+Install as a personal Pi package:
 
 ```sh
 pi install /home/ubuntu/src/sgai-pi/query-engine
 ```
 
-Then run `/reload` in Pi. The package registers `query` through supported Pi
-extension APIs; no installed Pi/provider patches.
+Run `/reload` after installing/updating. The tool interface remains:
 
-## Pi tool
+```json
+{"folder":"/project","question":"Find the API routes"}
+```
 
-Normal query:
+```json
+{"folder":"/project","dryRun":true}
+```
+
+The adapter uses the same Python CLI. It has no indexing, inference, storage or
+query-decision implementation. Source files are never edited by the query tool.
+
+## Models and configuration
+
+| Variable | Default / meaning |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Required for remote decisions only; never persisted |
+| `QUERY_DECISION_MODEL` | `openrouter/free`; alternatively an explicit model ending in `:free` |
+| `QUERY_DECISION_CONTEXT` | Conservative 32768-token cap, reduced if `/models` advertises a smaller window |
+| `QUERY_SGLANG_URL` | Settings `localBackendUrl`, otherwise `http://127.0.0.1:30000/v1`; loopback enforced |
+| `QUERY_LOCAL_MODEL` | Settings `localModel`, otherwise `granite-4.2-3b-awq` |
+| `QUERY_LOCAL_CONTEXT` | 32768; reduced by advertised model capacity |
+| `SETTINGS_SUBAGENTX_PATH` | `~/.pi/agent/settings-subagentx.json` for local model/URL defaults |
+| `PI_QUERY_STORE_DIR` | Whole store override, absolute or relative to process cwd |
+| `PI_CODING_AGENT_DIR` | Agent directory override; default `~/.pi/agent` |
+
+`openrouter/free` selects among available free models, rather than promising a
+specific Jev model. Only free router / `:free` IDs are allowed: no automatic paid
+fallback. Choose a pinned free model for predictable model identity. Rate limits
+and outages are surfaced as errors. HTTP timeouts are 180 seconds per request;
+no hidden retries of billed requests. Provider context compression is explicitly
+disabled. The 3.5-character estimate is deliberately approximate; a tokenizer or
+provider can still reject a request and such failures are reported, never clipped.
+
+## Index mechanism: unchanged file summaries
+
+Canonical realpaths share an index. Different folders (including parents and
+children) have independent SHA-256-keyed databases:
+
+```text
+~/.pi/agent/query-engine/<sha256(canonical absolute folder)>.db
+```
+
+Existing global indexes are read directly with the same `project` identity and
+`files(path, summary, content_hash, index_time)` schema. No rebuild or migration
+is required. Old project-local `query-engine.db` files remain untouched.
+
+1. Scan all eligible UTF-8 sources in binary alphabetical path order.
+2. Compare SHA-256 byte hashes; reuse unchanged summaries.
+3. Summarize added/changed sources with loopback SGLang, targeting **200 words**.
+   Large sources split losslessly into ordered 16000-byte chunks (smaller for
+   small configured windows). Recursively combine **all** chunk notes into one
+   summary; never truncate a source or discard the tail.
+4. Rescan sources; abort if anything changed. Atomically upsert all completed
+   summaries and remove deleted paths. No SQLite transaction spans inference.
+5. Answer only from the freshly synchronized map. Rescan before returning; reject
+   a stale answer if sources changed during query processing.
+
+File work and nested inference share one four-request semaphore. SQLite uses
+rollback journals and a five-second busy timeout. Cross-process calls may duplicate
+inference; commits verify that the complete path/hash map matches the snapshot.
+All workers settle on failure; failed syncs preserve the preceding complete map.
+
+The store is private (0700 directory, 0600 DB). Identity mismatch, symlinked store
+ancestors, symlink/hardlinked DBs and unsafe sidecars are refused. This is not a
+sandbox against another process with the same OS account swapping paths mid-call.
+
+## Simple state and hierarchical context
+
+State is an ordinary JSON object, not a transcript:
 
 ```json
 {
-  "folder": "/home/ubuntu/src/sglang-server",
-  "question": "Where is model inventory configured and which files document the selected SGLang model?"
+  "question": "Find authentication",
+  "part": "1/3",
+  "parts": [{
+    "part": "1/3",
+    "overview": "# Project map 1/3\n\n## Summary\n...",
+    "paths": ["auth.py", "routes.py"]
+  }]
 }
 ```
 
-Preview:
-
-```json
-{ "folder": "/home/ubuntu/src/sglang-server", "dryRun": true }
-```
-
-| Argument | Requirement | Meaning |
-| --- | --- | --- |
-| `folder` | Always required; nonblank string | Absolute path or relative to the Pi session cwd. No implicit cwd default. |
-| `question` | Required for normal queries; nonblank string | Project-level question or code/files to locate. Ignored in dry runs. |
-| `dryRun` | Optional boolean; default `false` | Plan indexing without applying it or answering a question. |
-
-The selected folder resolves to its canonical realpath. Symlink aliases and
-normalized paths share the same index; different folders, including a parent and
-its subfolder, have independent indexes. Returned source paths are relative to
-that canonical folder. A missing path or a non-directory fails explicitly.
-
-## CLI and help
-
-From this package directory:
-
-```sh
-node cli.mjs --help
-node cli.mjs --folder /home/ubuntu/src/sglang-server --dry-run
-node cli.mjs --folder /home/ubuntu/src/sglang-server --dry-run --json
-node cli.mjs --folder ./src --question "Where is authentication checked?"
-```
-
-Equivalent npm entry point: `npm run query -- --folder ./src --dry-run`.
-CLI-relative folders resolve from the shell cwd. Values containing spaces need
-shell quotes. `--folder=PATH` and `--question=QUESTION` are also supported.
-Unknown/duplicate options and missing/blank required values fail; no arguments
-prints usage. Exit codes: **0** success/help, **1** execution failure, **2** invalid
-arguments. With `--json`, stdout is one JSON document on success or an execution
-failure (`{"error":"..."}`); progress/errors go to stderr. Argument errors emit
-usage to stderr and no stdout document. `--help` / `-h` describes all flags.
-
-## Global index store
-
-Default location:
+Each request gets a fresh budget:
 
 ```text
-~/.pi/agent/query-engine/<SHA-256 of canonical absolute folder>.db
+estimated tokens = ceil(characters / 3.5)
+usable input = floor(context window × 0.90)
+               − estimated system prompt tokens − output reserve
 ```
 
-`PI_CODING_AGENT_DIR` changes the agent-directory portion. `PI_QUERY_STORE_DIR`
-overrides the whole store directory (relative values resolve from the process
-cwd; use an absolute path for predictable results). Both Pi and CLI use the same
-store. There is no cross-folder summary reuse and no default tenant/owner.
+Here “90% buffer” means 90% utilization / **10% headroom**, not reserving 90% unused.
+Serialized state, question, paths and markers count too. Default output reserve is
+2048 tokens. SGLang uses thinking disabled for predictable indexing output.
 
-```sh
-PI_QUERY_STORE_DIR=/tmp/query-indexes node cli.mjs --folder ./src --dry-run
-```
+Small maps send **all complete file summaries** to the decision model. Oversized
+maps are partitioned without dropping rows. SGLang creates an approximately
+**400-word** overview per part, presented with **H1 + H2** headings and explicit
+`1/n`, `2/n`, … markers. Oversized individual summaries split into path-labelled
+fragments. Derived parts are cached separately in `map_cache`, keyed by the full
+map, local model and context; the original file-summary rows are unchanged.
 
-Each database records its canonical folder identity and refuses a mismatch. The
-`files` table has exactly one row per eligible source, with `path`, `summary`,
-`content_hash` (SHA-256 of bytes) and `index_time`. Normal queries create the store
-with mode **0700** and databases with **0600**. Symlinked store ancestors,
-symlink/hardlinked databases and unsafe SQLite sidecars are refused. The store is
-a private local cache, not a sandbox against other processes under the same OS
-account. Summaries can contain sensitive source information.
+Every part retains its exact path catalog. If the complete overview map cannot
+fit a remote request, decisions run on every bounded group, then recursively
+merge **all** intermediate decisions until one result remains. This architecture
+is independent of a particular folder or model. Impossible singleton states or
+nonshrinking reductions fail clearly instead of silently clipping context.
+Compression can lose detail: it is surfaced in answer limitations.
 
-**Legacy caches:** project-local `query-engine.db` files are not read, migrated,
-overwritten or deleted. The first normal query rebuilds its new global index
-from sources. Delete an old local cache manually only if you no longer need it.
-To rebuild a global cache, remove the exact returned `database` file while no
-queries are running; the next normal query recreates it. No automatic pruning.
+Model decisions must have `answer`, ordered `files` (`path`, `reason`) and string
+`limitations`. Every recommended path is validated against the exact indexed
+catalog supplied to that decision. Merge stages cannot invent new candidates;
+duplicate/unindexed paths, malformed JSON and truncated completions fail. Final
+recommendations include the original cached file summaries for source verification.
+Usage from local and remote calls is returned to Pi for accounting.
 
-## Dry-run result
+## Dry run and eligibility
 
-```json
-{
-  "dryRun": true,
-  "folder": "/canonical/project",
-  "database": "/home/user/.pi/agent/query-engine/<hash>.db",
-  "indexed": 3,
-  "eligible": 3,
-  "pending": {
-    "added": ["new.py"],
-    "changed": ["handler.ts"],
-    "deleted": ["removed.md"],
-    "unchanged": ["start.sh"]
-  },
-  "sync": { "updated": 2, "deleted": 1, "unchanged": 1 }
-}
-```
+Dry runs use the exact scanner/hashes but never call models, create a store,
+migrate schema or write journals. Existing DBs open read-only; WAL-mode indexes
+are refused before connecting to avoid SQLite sidecar writes. Result includes
+`folder`, `database`, `indexed`, `eligible`, alphabetical `pending` arrays
+(`added`, `changed`, `deleted`, `unchanged`) and planned `sync` counts.
 
-- `indexed` is the cached row count **before** a sync; `eligible` is the current
-  source count. `database` is the intended path even if it does not exist.
-- All four path arrays are alphabetical, complete and relative to `folder`.
-  `changed` is based on bytes, not modification times. Renames appear as
-  added/deleted. Newly excluded files appear as deleted if previously cached.
-- `sync` is **planned work**: `updated = added + changed`, not performed writes.
-- No directory/schema creation, migration, journal/accounting writes, inference,
-  backend imports or network calls. Existing indexes open read-only. Indexes use
-  SQLite rollback journals so read-only inspection does not create WAL/SHM files;
-  a manually converted WAL index is refused by dry runs.
-- Planning uses the same scanner/hashes as actual indexing, including tokenizer
-  filtering, symlink refusal and UTF-8 validation. It reads full eligible files;
-  a large tree can still take time. It is a point-in-time plan, not a reservation;
-  normal queries rescan and validate independently.
-- No answer/recommendations or usage billing information is returned. Invalid or
-  corrupt stores fail explicitly rather than reporting an empty cache.
-
-## Normal query and indexing guarantees
-
-Before answering, the engine syncs added/changed/deleted sources atomically.
-Unchanged files reuse their summaries. It sends **every** cached row in binary
-alphabetical path order, with path, summary and index time, to local SGLang.
-There is no top-k retrieval, query-map clipping, stale-map fallback or source edit.
-
-A normal result includes `dryRun:false`, `folder`, `database`, `indexed` (after
-sync), `sync` (performed counts), `answer`, ordered `files` with `path`, `reason`
-and cached `summary`, and `limitations`. Model usage is available separately in
-the library result/Pi tool accounting. Answers use SGLang constrained JSON;
-recommended paths must actually exist in the indexed map.
-
-Each summary targets about **200 words** as a sizing hint, not a hard limit.
-Sources are consumed completely. Large UTF-8 files split losslessly into ordered
-chunks; every chunk is summarized, then reduced into one file summary. All
-indexing work shares at most **four** concurrent inference calls. Progress reports
-completed files and chunks, then answering. UTF-8 characters are never split.
-
-Sources are checked again before committing and before returning an answer.
-Summarization/cancellation/race failures cannot commit a partial source map.
-Same-folder operations serialize within one process; SQLite commits are
-transactional, but cross-process calls can duplicate inference work. Inference
-outages, invalid model responses and full-map context-capacity failures are
-reported; no silently stale answer. A source change during answering rejects the
-answer, although the already-completed index sync remains committed.
-
-## Eligibility and exclusions
-
-Eligible extensions (case-insensitive):
+Eligible extensions:
 
 ```text
-.py .js .mjs .cjs .ts .tsx .jsx .md .html .css .svelte .txt
+.py .js .jsx .mjs .cjs .md .ts .tsx .html .css .svelte .txt
 .sh .bash .yaml .yml .toml
 ```
 
-Skipped directory names:
+Skipped directory names (same as the prior implementation):
 
 ```text
-.git .hg .svn node_modules __pycache__ .venv venv env .env
-site-packages vendor dist build out target coverage .next .nuxt
-.svelte-kit .cache .tmp hf-cache
+node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache
+.ruff_cache .cache .svelte-kit .next dist build coverage hf-cache .tmp
 ```
 
-Also skipped: `query-engine.db` and its sidecars, `.min.js`/`.min.css`, lock files,
-source/directory symlinks, and anything outside the selected folder. No `.gitignore`
-filtering: eligible hidden or ignored files may be indexed. NUL/binary or invalid
-UTF-8 content in an otherwise eligible file fails explicitly; it is never
-silently omitted.
+Skip source/directory symlinks; never cross the selected folder boundary.
+`merges.txt` / `vocab.txt` are excluded only beside regular tokenizer JSON markers;
+model READMEs and custom code remain eligible. No `.gitignore` filtering: eligible
+hidden/ignored files may be indexed. Invalid UTF-8 or NUL content fails explicitly.
 
-`merges.txt` / `vocab.txt` are excluded **only** beside a regular
-`tokenizer_config.json` or `tokenizer.json`. These are tokenizer data, not source.
-Model READMEs, custom code and ordinary `src/models/` sources remain eligible;
-there is no blanket model-directory exclusion. A symlinked tokenizer marker does
-not authorize the exclusion.
+## Library, modules and checks
 
-## Library and modules
+```python
+from query_engine import plan_project, query_project
 
-```js
-import { planProject, queryProject } from "./lib/query-engine.mjs";
-
-const plan = await planProject({ folder: "/project", signal });
-const result = await queryProject({ folder: "/project", question: "Find routes", signal, onProgress });
-// queryProject({ folder, dryRun: true }) is equivalent to planProject.
+plan = plan_project('/project')
+result = query_project('/project', 'Find routes')
+index = query_project('/project', index_only=True)
 ```
 
-- `lib/query-engine.mjs`: scanner, lossless chunking, concurrency, summarization,
-  source verification and orchestration.
-- `lib/index-store.mjs`: canonical-folder key location, private SQLite store,
-  read-only cache snapshots, identity checks and hash-based planning categories.
-- `lib/format-result.mjs`: shared text output for Pi and CLI.
-- `extensions/sgai-query.ts`: required parameters, output schema, progress and
-  Pi accounting adapter.
-- `cli.mjs`: strict argument parsing, help, output and exit-code adapter.
-
-Optional library dependencies `complete`, `check` and `storeDir` support isolated
-checks. Dry runs never invoke `check` or `complete`.
-
-## Validation
+- `query_engine/engine.py`: scanning, sync, hierarchy and typed decision pipeline.
+- `query_engine/store.py`: compatible SQLite store, identity and dry-run safety.
+- `query_engine/models.py`: local/remote HTTP clients, budgets and usage.
+- `query_engine/__main__.py` / `cli.py`: Python CLI and text presentation.
+- `extensions/sgai-query.ts`: Pi schema and Python process adapter only.
 
 ```sh
-npm test                  # unit, planning, CLI and Pi extension integration
-npm run test:extension    # Pi SDK loader + mock local HTTP server
-npm run test:live         # real local SGLang; fails if unavailable
+npm test                       # Python checks plus Pi SDK adapter smoke
+npm run test:live               # Real SGLang; OpenRouter when key supplied
 ```
 
-Tests isolate stores and cover canonical alias reuse/folder isolation, required
-arguments, offline/nonmutating dry runs, legacy caches, identity/link safety,
-incremental sync, rollback, source races, full Unicode consumption, tokenizer
-exclusions, four-call concurrency, CLI help/JSON and extension usage accounting.
-Live checks index a disposable project, preview before/after, query real SGLang,
-and verify incremental sync. Live inference speed/relevance is not established
-by offline checks.
+Unit tests use disposable projects and fake model responses. Live tests use a
+fresh temporary store and check actual local summaries, incremental sync and
+read-only planning. A skipped OpenRouter stage does **not** establish remote
+health, decision accuracy or end-to-end live success.

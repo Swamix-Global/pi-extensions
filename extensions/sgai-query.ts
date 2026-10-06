@@ -1,8 +1,9 @@
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { queryProject } from "../lib/query-engine.mjs";
-import { formatDry, formatNormal } from "../lib/format-result.mjs";
+import { fileURLToPath } from "node:url";
+
+const cli = fileURLToPath(new URL("../cli.py", import.meta.url));
 
 const syncSchema = Type.Object({
   updated: Type.Number({ description: "Files added or re-summarized (planned count in dry runs)." }),
@@ -46,14 +47,14 @@ export default function queryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "query",
     label: "Project Query",
-    description: "Preferred first tool for project/folder codebase discovery. Indexes eligible source files into a per-folder cache under the global store (~/.pi/agent/query-engine, overridable with PI_QUERY_STORE_DIR), then asks local Nemotron through SGLang using ALL alphabetically sorted file summaries. Returns an answer, relevant files to read in order, and context. folder is required and resolved relative to the session cwd. Use dryRun:true to preview pending added/changed/deleted files, counts and the store path with no writes, no inference and no network. Not exact source evidence; use read afterward to verify code. Never edits source files and never uses remote inference.",
+    description: "Preferred first tool for project/folder codebase discovery. Indexes eligible source files into a per-folder cache under the global store (~/.pi/agent/query-engine, overridable with PI_QUERY_STORE_DIR), then uses OpenRouter free-model structured decisions over all alphabetical summaries (hierarchical H1/H2 parts for oversized maps). Raw sources are indexed locally by SGLang; summaries and paths are sent to OpenRouter. Returns an answer, relevant files to read in order, and context. folder is required and resolved relative to the session cwd. Use dryRun:true to preview pending added/changed/deleted files, counts and the store path with no writes, no inference and no network. Not exact source evidence; use read afterward to verify code. Never edits source files. Normal queries require OPENROUTER_API_KEY; dry runs stay offline.",
     promptSnippet: "Discover codebase structure and locate relevant files using the complete local project map.",
     promptGuidelines: [
       "Give query highest preference for codebase exploration, file discovery and project-level questions, before exploratory read/find/grep calls. Then read the recommended files for exact evidence and before editing. Explicit file reads and non-codebase files may go directly to read.",
       "Always pass folder (absolute or relative to the session cwd); it is required and selects the folder whose per-folder cache is used. Use dryRun:true to preview pending added/changed/deleted/unchanged files and the store path before a slow first index; dry runs perform no writes, no inference and no network calls and may omit question.",
       "query returns summary-based discovery, not exact source evidence. If query fails, report the failure; do not treat old summaries as verified code.",
     ],
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     parameters: Type.Object({
       folder: Type.String({
         minLength: 1,
@@ -76,18 +77,16 @@ export default function queryExtension(pi: ExtensionAPI) {
       const rawQuestion = typeof params.question === "string" ? params.question.trim() : "";
       if (!dryRun && !rawQuestion) throw new Error("question is required unless dryRun is true.");
       const folder = path.resolve(ctx.cwd, rawFolder);
-      const onProgress = (text) => onUpdate?.({ content: [{ type: "text", text }], details: undefined });
-      if (dryRun) {
-        const result = await queryProject({ folder, dryRun: true, signal, onProgress });
-        return {
-          content: [{ type: "text", text: formatDry(result) }],
-          details: result,
-          structuredContent: result,
-        };
-      }
-      const { usage, ...result } = await queryProject({ folder, question: rawQuestion, signal, onProgress });
+      onUpdate?.({ content: [{ type: "text", text: dryRun ? "Planning offline…" : "Syncing Python index and querying OpenRouter…" }], details: undefined });
+      const args = [cli, "--folder", folder, "--json", ...(dryRun ? ["--dry-run"] : ["--question", rawQuestion])];
+      const process = await pi.exec("python3", args, { signal });
+      if (process.code !== 0) throw new Error(process.stderr || process.stdout || "Python query engine failed");
+      const { usage, ...result } = JSON.parse(process.stdout);
+      const text = dryRun
+        ? `Folder: ${result.folder}\nStore: ${result.database}\nDry run: ${result.eligible} eligible files\n${JSON.stringify(result.pending, null, 2)}`
+        : `Folder: ${result.folder}\nStore: ${result.database}\n${result.answer}\n\nFiles to read (in order):\n${result.files.map((file) => `${file.path}\nWhy read: ${file.reason}\nContext: ${file.summary}`).join("\n\n")}\n\nLimitations: ${result.limitations.join("; ")}`;
       return {
-        content: [{ type: "text", text: formatNormal(result) }],
+        content: [{ type: "text", text }],
         details: result,
         structuredContent: result,
         usage,
