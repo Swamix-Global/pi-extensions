@@ -51,6 +51,10 @@ def scenario_dry_run_and_query():
         root = base / "source"
         root.mkdir()
         store = base / "store"
+
+        help_proc = _run(store, "--help")
+        assert help_proc.returncode == 0 and "Local hash-only query engine" in help_proc.stdout
+
         lines = [f"filler line {i:04d}" for i in range(1999)]
         lines[1899] = "UNIQUE_TAIL_MARKER = compute()"
         tail = root / "tail.py"
