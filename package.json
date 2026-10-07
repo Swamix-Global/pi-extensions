@@ -4,10 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "python3 -B -m unittest discover -s tests -v && npm run test:extension",
-    "query": "python3 -B cli.py",
-    "test:extension": "node tests/extension.test.mjs",
-    "test:live": "python3 -B tests/live.py"
+    "test": "python3 -B tests/live.py && node tests/extension.test.mjs",
+    "query": "python3 -B cli.py"
   },
   "pi": {
     "extensions": ["extensions/sgai-query.ts"]

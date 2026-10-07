@@ -25,21 +25,6 @@ __all__ = [
     "pending_files",
 ]
 
-_SCHEMA = """\
-PRAGMA busy_timeout=5000; PRAGMA journal_mode=DELETE;
-CREATE TABLE IF NOT EXISTS project (
-  id INTEGER PRIMARY KEY CHECK(id = 1),
-  folder TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS files (
-  path TEXT PRIMARY KEY NOT NULL,
-  summary TEXT NOT NULL,
-  content_hash TEXT NOT NULL,
-  index_time TEXT NOT NULL
-);
-"""
-
-
 def _default_store_dir() -> str:
     override = os.environ.get("PI_QUERY_STORE_DIR")
     if override:
@@ -59,7 +44,10 @@ def location(folder: str, store_dir: Any = None) -> Path:
     ``path.resolve`` in the original.
     """
     raw = store_dir if store_dir is not None else _default_store_dir()
-    directory = os.path.abspath(os.fspath(raw))
+    directory = os.fspath(raw)
+    if not os.path.isabs(directory) or not os.path.isabs(folder):
+        raise ValueError("Folder and store paths must be absolute")
+    directory = os.path.abspath(directory)
     key = hashlib.sha256(os.fspath(folder).encode("utf-8")).hexdigest()
     return Path(directory) / f"{key}.db"
 
@@ -141,7 +129,7 @@ def _verify_folder(db: sqlite3.Connection, folder: str) -> None:
     row = db.execute("SELECT folder FROM project WHERE id = 1").fetchone()
     if row is None or row["folder"] != folder:
         raise RuntimeError(
-            "Index folder identity mismatch; refusing another folder's summaries."
+            "Index folder identity mismatch; refusing another folder's index."
         )
 
 
@@ -149,7 +137,7 @@ def read_rows(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     """Return ``{path: rowdict}`` ordered by binary path."""
     return {
         row["path"]: dict(row)
-        for row in db.execute("SELECT * FROM files ORDER BY path COLLATE BINARY")
+        for row in db.execute("SELECT path, content_hash FROM files ORDER BY path COLLATE BINARY")
     }
 
 
@@ -191,7 +179,10 @@ def read_index(folder: str, database: Path) -> dict[str, dict[str, Any]]:
                 "Dry run requires a rollback-journal index; refusing WAL sidecar writes."
             )
         _verify_folder(db, folder)
-        return read_rows(db)
+        rows = read_rows(db)
+        legacy = [r[1] for r in db.execute("PRAGMA table_info(files)")] != ["path", "content_hash"]
+        return {os.path.abspath(os.path.join(folder, path)): {"path": os.path.abspath(os.path.join(folder, path)),
+                "content_hash": "" if legacy else row["content_hash"]} for path, row in rows.items()}
 
 
 def open_index(folder: str, database: Path) -> sqlite3.Connection:
@@ -217,9 +208,22 @@ def open_index(folder: str, database: Path) -> sqlite3.Connection:
     db.isolation_level = None
     db.row_factory = sqlite3.Row
     try:
-        db.executescript(_SCHEMA)
-        db.execute("INSERT OR IGNORE INTO project(id, folder) VALUES (1, ?)", (folder,))
-        _verify_folder(db, folder)
+        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("PRAGMA journal_mode=DELETE")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK(id=1), folder TEXT NOT NULL)")
+            db.execute("INSERT OR IGNORE INTO project(id, folder) VALUES (1, ?)", (folder,))
+            _verify_folder(db, folder)
+            columns = [r[1] for r in db.execute("PRAGMA table_info(files)")]
+            if columns and columns != ["path", "content_hash"]:
+                db.execute("DROP TABLE files")
+            db.execute("DROP TABLE IF EXISTS map_cache")
+            db.execute("CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY NOT NULL, content_hash TEXT NOT NULL)")
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
         return db
     except BaseException:
         db.close()

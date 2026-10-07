@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Locate the installed ESM-only host without adding duplicate runtime dependencies.
+// Load the installed Pi SDK and real extension, not a stub of Pi's API.
 const candidates = [
   fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent", import.meta.url)),
   path.join(os.homedir(), ".pi/agent/node_modules/@earendil-works/pi-coding-agent"),
@@ -16,69 +16,48 @@ for (const candidate of candidates) {
     if (error.code !== "ENOENT") throw error;
   }
 }
-assert.ok(sdkRoot, "Install Pi before running the extension integration test");
+assert.ok(sdkRoot, "Install Pi before running the functional test");
 const manifest = JSON.parse(await fs.readFile(path.join(sdkRoot, "package.json"), "utf8"));
-const sdkEntry = path.join(sdkRoot, manifest.exports["."].import);
-const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } = await import(pathToFileURL(sdkEntry).href);
+const { DefaultResourceLoader, SettingsManager } = await import(pathToFileURL(path.join(sdkRoot, manifest.exports["."].import)).href);
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "query-extension-test-"));
-const store = path.join(root, "store");
+const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "query-extension-")));
+const previousStore = process.env.PI_QUERY_STORE_DIR;
 try {
-  const folder = path.join(root, "project");
+  const folder = path.join(root, "project"), store = path.join(root, "store"), source = path.join(folder, "demo.ts");
   await fs.mkdir(folder);
-  await fs.writeFile(path.join(folder, "demo.ts"), "export function handler(request) { return request; }\n");
-
-  // Load the real extension through the supported Pi SDK resource loader.
+  await fs.writeFile(source, "export function handler(request) { return request; }\n");
+  process.env.PI_QUERY_STORE_DIR = store;
   const loader = new DefaultResourceLoader({
-    cwd: root,
-    agentDir: path.join(root, "agent"),
-    settingsManager: SettingsManager.inMemory({}),
+    cwd: root, agentDir: path.join(root, "agent"), settingsManager: SettingsManager.inMemory({}),
     additionalExtensionPaths: [fileURLToPath(new URL("../extensions/sgai-query.ts", import.meta.url))],
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
+    noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
   });
   await loader.reload();
-  const loaded = loader.getExtensions();
-  assert.deepEqual(loaded.errors, []);
-  assert.equal(loaded.extensions.length, 1);
+  assert.deepEqual(loader.getExtensions().errors, []);
+  const tool = loader.getExtensions().extensions[0].tools.get("query").definition;
+  const execute = (params) => tool.execute("functional", params, undefined, undefined, { cwd: root });
 
-  // Registration and schema contract.
-  const tool = loaded.extensions[0].tools.get("query")?.definition;
-  assert.ok(tool, "Pi resource loader must register query");
-  assert.equal(tool.name, "query");
-  assert.ok(tool.promptGuidelines[0].includes("highest preference"));
-  assert.ok(tool.outputSchema, "query must declare an output schema");
-  assert.deepEqual(tool.parameters.required, ["folder"]);
-  assert.ok(tool.parameters.properties.folder.minLength >= 1);
-  assert.ok(!tool.parameters.required.includes("question"));
-  assert.ok(!tool.parameters.required.includes("dryRun"));
-  const variants = tool.outputSchema.anyOf;
-  assert.ok(Array.isArray(variants) && variants.length === 2, "output schema must cover dry-run and query results");
-  assert.equal(variants[0].properties.dryRun.const, true);
-  assert.equal(variants[1].properties.dryRun.const, false);
-  assert.ok(variants[0].properties.pending, "dry-run variant must expose pending changes");
-  assert.ok(variants[1].properties.answer, "query variant must expose the answer");
-
-  // Run the offline dry run through the extension's Python subprocess.
-  process.env.PI_QUERY_STORE_DIR = store;
-  const preview = await tool.execute("dry", { folder: "project", dryRun: true }, undefined, undefined, { cwd: root });
-  assert.equal(preview.structuredContent.dryRun, true);
-  assert.equal(preview.structuredContent.folder, await fs.realpath(folder));
-  assert.equal(preview.structuredContent.indexed, 0);
-  assert.equal(preview.structuredContent.eligible, 1);
-  assert.deepEqual(preview.structuredContent.pending.added, ["demo.ts"]);
-  assert.deepEqual(preview.structuredContent.sync, { updated: 1, deleted: 0, unchanged: 0 });
-  assert.ok(preview.structuredContent.database.startsWith(store + path.sep), "store path must honor PI_QUERY_STORE_DIR");
-  assert.match(preview.content[0].text, /Dry run: 1 eligible files/);
-  assert.equal(preview.structuredContent.answer, undefined, "dry runs must not perform inference");
-
-  // A plan must leave no cache behind.
+  const preview = await execute({ folder, dryRun: true });
+  assert.deepEqual(preview.structuredContent.pending.added, [source]);
   await assert.rejects(fs.stat(store), { code: "ENOENT" });
-  await assert.rejects(tool.execute("missing", {}, undefined, undefined, { cwd: root }), /folder/i);
+  const first = await execute({ folder, question: "handler" });
+  assert.equal(first.structuredContent.files[0].path, source);
+  assert.match(first.content[0].text, /demo\.ts:1[\s\S]*Excerpt:\nexport function handler/);
 
-  console.log("query extension smoke OK (Pi SDK loader registration, schemas, offline Python dry run, no store writes)");
+  await fs.writeFile(source, "export function handler(request) { return request.body; }\n");
+  const changed = await execute({ folder, question: "handler" });
+  assert.deepEqual(changed.structuredContent.sync, { updated: 1, deleted: 0, unchanged: 0 });
+  assert.match(changed.structuredContent.files[0].excerpt, /request\.body/);
+  await fs.unlink(source);
+  const deleted = await execute({ folder, question: "handler" });
+  assert.equal(deleted.structuredContent.sync.deleted, 1);
+  assert.deepEqual(deleted.structuredContent.files, []);
+  await assert.rejects(execute({ folder: "relative", dryRun: true }), /absolute/i);
+  await fs.writeFile(source, "\0");
+  await assert.rejects(execute({ folder, question: "handler" }), /binary/i);
+  console.log("PASS query Pi extension: preview, retrieval, changed/deleted sources and explicit errors");
 } finally {
+  if (previousStore === undefined) delete process.env.PI_QUERY_STORE_DIR;
+  else process.env.PI_QUERY_STORE_DIR = previousStore;
   await fs.rm(root, { recursive: true, force: true });
 }
