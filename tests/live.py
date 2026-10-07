@@ -194,15 +194,15 @@ def scenario_legacy_invalid_and_refusals():
             assert conn.execute("SELECT name FROM sqlite_master WHERE name='map_cache'").fetchone() is None
         assert _rows(db) == {str(source): _sha(source)}
 
-        # Invalid UTF-8 scan exits nonzero, clears cached rows; repaired source succeeds.
+        # Invalid UTF-8 scan exits nonzero, preserves cached rows; repaired source succeeds.
         bad = root / "bad.py"
         bad.write_bytes(b"legacy_marker \xff")
         failed = _run(store, "--folder", str(root), "--index-only")
         assert failed.returncode == 1 and "utf-8" in _load(failed)["error"].lower()
-        assert _rows(db) == {}, "failed scan must clear cached rows"
+        assert _rows(db) == {str(source): _sha(source)}, "failed scan must preserve cached rows"
         bad.write_text("def repaired_marker(): return 2\n", encoding="utf-8")
         repaired = _load(_run(store, "--folder", str(root), "--question", "repaired_marker"))
-        assert repaired["sync"] == {"updated": 2, "deleted": 0, "unchanged": 0}
+        assert repaired["sync"] == {"updated": 1, "deleted": 0, "unchanged": 1}
         assert repaired["files"][0]["path"] == str(bad)
         assert _rows(db) == {str(source): _sha(source), str(bad): _sha(bad)}
 
@@ -235,7 +235,7 @@ def main():
           "deletion removes rows; forced reindex deletes before insert; stored hashes match SHA-256")
     scenario_legacy_invalid_and_refusals()
     print("PASS scenario 3: legacy summary migration previews read-only then rebuilds; invalid UTF-8 exits "
-          "nonzero and clears rows before repair; cross-folder, hardlinked database and symlinked store refused")
+          "nonzero and preserves cached rows before repair; cross-folder, hardlinked database and symlinked store refused")
 
 
 if __name__ == "__main__":

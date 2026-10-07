@@ -118,15 +118,12 @@ def sync_index(root, database, progress=lambda text: None, reindex=False):
             progress(f"Sync: {len(files)} files; {len(changed)} indexed; {len(pending['deleted'])} deleted")
             db.executemany("INSERT INTO files(path,content_hash) VALUES (?,?)",
                            ((path, files[path]["content_hash"]) for path in changed))
-            if not same_sources(files, scan_sources(root)):
-                raise RuntimeError("Sources changed during indexing; index invalidated, rerun query")
             if not same_sources(files, read_rows(db)):
                 raise RuntimeError("Index hash mismatch; index invalidated, rerun query")
             db.execute("COMMIT")
         except BaseException:
             if db.in_transaction:
                 db.execute("ROLLBACK")
-            db.execute("DELETE FROM files")
             raise
     return files, {"updated": len(changed), "deleted": len(pending["deleted"]),
                    "unchanged": 0 if reindex else len(pending["unchanged"])}
@@ -154,11 +151,4 @@ def query_project(folder, question=None, dry_run=False, index_only=False, store_
         result.update({"answer": f"Found {len(ranked)} lexical matches ranked by BM25 + TF-IDF (RRF)." if ranked
                        else "No lexical matches found; try exact symbols or different search terms.",
                        "files": ranked, "limitations": ["Lexical retrieval, not semantic inference; read full sources before editing."]})
-    try:
-        if not same_sources(files, scan_sources(root)):
-            raise RuntimeError("Sources changed while querying; index invalidated, rerun query")
-    except BaseException:
-        with closing(open_index(root, database)) as db:
-            db.execute("DELETE FROM files")
-        raise
     return result
