@@ -91,7 +91,7 @@ def _assert_map(record, expected, map_kind):
 
 
 def scenario_dry_run_and_query():
-    """Scenario 1: dry-run filtering, exact whole-file maps and context reduction."""
+    """Scenario 1: dry-run filtering, exact whole-file maps, contract scope and context reduction."""
     with tempfile.TemporaryDirectory(prefix="query-live-s1-") as tmp:
         base = Path(tmp).resolve()
         root = base / "source"
@@ -462,6 +462,58 @@ def scenario_dry_run_and_query():
         hidden = _load(_run(store, "--folder", str(root), "--question", "zzq_excluded_fixture"))
         assert hidden["files"] == [], "excluded formats, ignored paths, symlinks and dependencies stay unindexed"
 
+        # Contract scope: only a query rooted exactly at .pi/subagents/contracts includes
+        # Markdown, skips Git ignore and excludes *.claim dirs; other paths keep rules.
+        project = base / "contracts-project"
+        contracts = project / ".pi/subagents/contracts"
+        contracts.mkdir(parents=True)
+        (project / ".gitignore").write_text("/.pi/subagents/contracts/*\n/src/ignored.py\n", encoding="utf-8")
+        contract_files = []
+        for name, body in (("contract-01.md", "zebra zebra zebra\n"), ("contract-02.md", "zebra\n"),
+                           ("contract-03.md", "zebra\n"), ("contract-04.md", "zebra\n"),
+                           ("contract-05.md", "zebra\n"), ("contract-06.md", "zebra\n"),
+                           ("contract-07.md", "octopus\n")):
+            contract_files.append(_write(contracts, name, body))
+        claim = contracts / "contract-01.claim"
+        claim.mkdir()
+        (claim / "owner.md").write_text("zebra zebra zebra zebra zebra\n", encoding="utf-8")
+        kept = _write(project, "src/kept.py", "def walrus(): return 'zebra'\n")
+        ignored = _write(project, "src/ignored.py", "def walrus(): return 'zebra'\n")
+        _write(project, "src/notes.md", "walrus zebra\n")
+        subprocess.run(["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True)
+        probe = subprocess.run(["git", "-C", str(project), "check-ignore", *map(str, [*contract_files, ignored])],
+                               capture_output=True, text=True)
+        assert probe.returncode == 0 and set(probe.stdout.split()) == {str(p) for p in [*contract_files, ignored]}, \
+            "contract and ordinary fixtures must be genuinely Git-ignored"
+
+        # The same scanner previews contract scope: Markdown eligible, claim owner.md excluded.
+        contract_plan = _load(_run(store, "--folder", str(contracts), "--dry-run"))
+        assert contract_plan["eligible"] == 7
+        assert contract_plan["pending"]["added"] == [str(p) for p in contract_files]
+
+        # Zero, one and six matches with deterministic ranking and irrelevant filtering.
+        none_contract = _load(_run(store, "--folder", str(contracts), "--question", "quasar"))
+        assert none_contract["files"] == [] and "No lexical matches" in none_contract["answer"]
+        one_contract = _load(_run(store, "--folder", str(contracts), "--question", "octopus"))
+        assert [f["path"] for f in one_contract["files"]] == [str(contracts / "contract-07.md")]
+        six_contract = _load(_run(store, "--folder", str(contracts), "--question", "zebra"))
+        assert [f["path"] for f in six_contract["files"]] == [str(p) for p in contract_files[:6]], \
+            "contract scope must return all six positive candidates in stable order"
+        repeat_contract = _load(_run(store, "--folder", str(contracts), "--question", "zebra"))
+        assert [f["path"] for f in repeat_contract["files"]] == [f["path"] for f in six_contract["files"]], \
+            "contract ranking must be deterministic"
+        assert all(f["score"] > 0 and Path(f["path"]).is_absolute() for f in six_contract["files"])
+        assert _rows(_database(store, contracts)) == {str(p): _sha(p) for p in contract_files}, \
+            "claim owner.md must stay out of the index"
+
+        # Ordinary source queries in the same Git repo still skip ignored files and unlisted Markdown.
+        src = project / "src"
+        src_plan = _load(_run(store, "--folder", str(src), "--dry-run"))
+        assert src_plan["pending"]["added"] == [str(kept)]
+        ordinary = _load(_run(store, "--folder", str(src), "--question", "walrus"))
+        assert [f["path"] for f in ordinary["files"]] == [str(kept)], \
+            "ordinary queries must keep Git ignore and unlisted-Markdown rules"
+
         # Relative source folder is a runtime failure.
         rel = _run(store, "--folder", "relative", "--dry-run")
         assert rel.returncode == 1 and "absolute" in _load(rel)["error"]
@@ -761,7 +813,9 @@ def main():
           "excerpt-free map; every fixture returns its exact consecutive sections ending on the final "
           "physical line under a soft hundred-word budget, fenced/commented/docstring, heredoc, C++ "
           "raw-string, Go and Rust fakes stay absent while env bash/sh/zsh/fish shebangs map structurally "
-          "and every dense declaration survives; rendered context stays far below the sources")
+          "and every dense declaration survives, contract-scope queries rooted exactly at "
+          ".pi/subagents/contracts index Git-ignored Markdown without claim owner.md and return every "
+          "positive candidate deterministically, and rendered context stays far below the sources")
     scenario_hash_lifecycle()
     print("PASS scenario 2: mtime-preserving equal-length edit reindexes; dry-run keeps database bytes; "
           "deletion removes rows; forced reindex deletes before insert; stored hashes match SHA-256")

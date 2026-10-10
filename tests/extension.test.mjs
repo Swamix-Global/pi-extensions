@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -49,6 +50,16 @@ try {
   const tool = loader.getExtensions().extensions[0].tools.get("query").definition;
   const execute = (params) => tool.execute("functional", params, undefined, undefined, { cwd: root });
 
+  // Capture the real subprocess argv: a python3 shim on PATH records NUL-separated
+  // arguments and delegates to the real interpreter running the real CLI.
+  const realPython = execFileSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
+  const binDir = path.join(root, "bin"), capturePath = path.join(root, "argv.bin");
+  const quote = (value) => `'${value.replaceAll("'", `'\\''`)}'`;
+  await fs.mkdir(binDir);
+  await fs.writeFile(path.join(binDir, "python3"),
+    `#!/bin/sh\nprintf '%s\\0' "$@" > ${quote(capturePath)}\nexec ${quote(realPython)} "$@"\n`);
+  await fs.chmod(path.join(binDir, "python3"), 0o755);
+
   // Schema agreement: derive expected file/section keys and map kinds from the declared output schema.
   const resultVariant = tool.outputSchema.anyOf.find((variant) => variant.properties?.files);
   const dryVariant = tool.outputSchema.anyOf.find((variant) => variant.properties?.pending);
@@ -85,6 +96,21 @@ try {
   assert.match(first.content[0].text, /- why: lexical: 1\/1 query terms \(handler\); best line 1/);
   assert.match(first.content[0].text, /^  - 1-1 handler: function$/m);
   assert.doesNotMatch(first.content[0].text, /export function handler/);
+
+  // The real subprocess boundary must receive the question byte-for-byte, including whitespace and Unicode.
+  const preservedQuestion = "\n\t  handler 检索\r\nsecond  line  \n";
+  const previousPath = process.env.PATH ?? "";
+  let captured;
+  try {
+    process.env.PATH = `${binDir}${path.delimiter}${previousPath}`;
+    captured = await execute({ folder, question: preservedQuestion });
+  } finally {
+    process.env.PATH = previousPath;
+  }
+  assert.deepEqual(captured.structuredContent.files.map((file) => file.path), [source]);
+  const argv = (await fs.readFile(capturePath, "utf8")).split("\0").slice(0, -1);
+  assert.deepEqual(argv,
+    [fileURLToPath(new URL("../cli.py", import.meta.url)), "--folder", folder, "--json", "--question", preservedQuestion]);
 
   await fs.writeFile(source, "// updated marker\nexport function handler(request) { return request.body; }\n");
   const changed = await execute({ folder, question: "handler" });

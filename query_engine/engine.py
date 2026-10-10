@@ -34,6 +34,10 @@ NAMED_SOURCE_FILES = {"Makefile", "makefile", "GNUmakefile", "Dockerfile", "Jenk
 MARKDOWN_FILENAMES = {"readme.md", "agents.md", "claude.md", "contributing.md", "architecture.md"}
 IGNORED_DIRECTORIES = set("node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache .ruff_cache .cache .svelte-kit .next dist build coverage hf-cache .tmp".split())
 
+# A query whose canonical root itself is this relative path gets contract scope:
+# contract Markdown is eligible and Git ignore checks are skipped only there.
+CONTRACT_SCOPE_PARTS = (".pi", "subagents", "contracts")
+
 
 def canonical(folder):
     """Require an absolute existing folder and resolve its canonical identity."""
@@ -43,6 +47,11 @@ def canonical(folder):
     if not root.is_dir():
         raise ValueError(f"Not a folder: {root}")
     return str(root)
+
+
+def is_contract_scope(root):
+    """True only when the canonical root itself is a .pi/subagents/contracts folder."""
+    return Path(root).parts[-len(CONTRACT_SCOPE_PARTS):] == CONTRACT_SCOPE_PARTS
 
 
 def is_git_repo(root):
@@ -64,9 +73,14 @@ def git_ignored(root, paths):
 
 
 def scan_sources(root, respect_gitignore=True):
-    """Read every eligible UTF-8 source with SHA-256 byte hashes and absolute paths."""
+    """Read every eligible UTF-8 source with SHA-256 byte hashes and absolute paths.
+
+    Contract-scope roots additionally read Markdown, skip Git ignore checks and
+    never descend into ``*.claim`` directories.
+    """
     root = canonical(root)
-    in_git = respect_gitignore and is_git_repo(root)
+    contracts = is_contract_scope(root)
+    in_git = respect_gitignore and not contracts and is_git_repo(root)
     files = {}
 
     def is_source(entry):
@@ -74,6 +88,8 @@ def scan_sources(root, respect_gitignore=True):
         if entry.name in NAMED_SOURCE_FILES or entry.name.lower() in MARKDOWN_FILENAMES:
             return True
         suffix = Path(entry.name).suffix.lower()
+        if suffix == ".md" and contracts:
+            return True
         if suffix:
             return suffix in SOURCE_EXTENSIONS
         return bool(entry.stat(follow_symlinks=False).st_mode & 0o111)
@@ -86,7 +102,7 @@ def scan_sources(root, respect_gitignore=True):
             if entry.is_symlink():
                 continue
             if entry.is_dir(follow_symlinks=False):
-                if entry.name not in IGNORED_DIRECTORIES:
+                if entry.name not in IGNORED_DIRECTORIES and not (contracts and entry.name.endswith(".claim")):
                     candidates.append(entry)
             elif entry.is_file(follow_symlinks=False) and is_source(entry):
                 candidates.append(entry)

@@ -14,6 +14,7 @@ resolve to a canonical absolute identity. No pip dependencies are required.
 ```sh
 python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project --dry-run --json
 python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project --question 'Find authentication routes'
+python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project/.pi/subagents/contracts --question 'prior launch contract'
 python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project --index-only --reindex
 python3 -B /home/ubuntu/src/sgai-pi/query-engine/reinstall.py
 ```
@@ -35,7 +36,7 @@ The registered `query` tool accepts:
 {"folder":"/project","dryRun":true}
 ```
 
-Normal queries return at most ten matches
+Normal queries return at most ten retrieval candidates
 with absolute `path`, `line`, `reason`, fused `score` and raw `bm25`/`tfidf`
 scores plus a compact whole-file `sections` map (`mapKind`: `structural` or
 `fallback`) targeting roughly a hundred name/purpose words per file. Human-readable
@@ -126,8 +127,8 @@ scripts; and the curated Markdown names `README.md`, `AGENTS.md`, `CLAUDE.md`,
 `.json`, `.yaml`, `.toml`) and unlisted Markdown are not indexed, so use explicit
 file reads for them.
 
-Git ignore rules are respected before reading ignored files. Excluded directory
-names:
+Git ignore rules are respected before reading ignored files, except in contract
+scope below. Excluded directory names:
 
 ```text
 node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache
@@ -136,6 +137,24 @@ node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache
 
 File/directory symlinks are skipped; the selected folder boundary is never
 crossed. Invalid UTF-8 or NUL-containing eligible files fail explicitly.
+
+### Contract scope
+
+A query whose canonical root is exactly `.pi/subagents/contracts` is bounded for
+prior-contract discovery: every Markdown file there is eligible and Git ignore
+checks are skipped, so contract fixtures stay retrievable in projects whose
+`.gitignore` hides that directory. Directories matching `*.claim/` are never
+scanned, keeping active-claim `owner.md` sidecars out of the index. Contract
+queries return up to ten retrieval candidates, deterministically ranked by
+fused score with absolute-path tie-breaking. That bound covers retrieval
+candidates only: launch filtering selects at most five completed contract
+outputs. Read the complete contract files before launching derived work or
+editing. `question` is forwarded to the Python engine unchanged (trimmed only
+for the non-empty check, so whitespace, Unicode and line endings survive), and
+the original query belongs in the child task while completed contract outputs
+enter system context. Outside this scope the original query requirements are
+untouched: ordinary source queries keep their eligibility, Git ignore rules
+and ten-candidate bound.
 
 ## Library and checks
 
