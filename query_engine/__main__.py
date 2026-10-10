@@ -8,7 +8,7 @@ from .indexer import auto_index_all_agent_folders
 
 
 def format_result(result):
-    """Present absolute paths and bounded verbatim retrieval evidence."""
+    """Present absolute paths and nested bullet-only structural file maps."""
     lines = [f"Folder: {result['folder']}", f"Store: {result['database']}"]
     sync = result["sync"]
     lines.append(f"Index: {result['indexed']} files; {sync['updated']} updated, {sync['deleted']} deleted, {sync['unchanged']} unchanged.")
@@ -19,9 +19,14 @@ def format_result(result):
     elif result.get("indexOnly"):
         lines.append("Indexed file hashes locally; no summaries or model calls.")
     else:
-        lines.extend(["", result["answer"], "", "Files to read (in order):"])
+        lines.extend(["", result["answer"], "", "File maps (in order):"])
         for file in result["files"]:
-            lines.extend([f"{file['path']}:{file['line']}", f"Why read: {file['reason']}", f"Excerpt:\n{file['excerpt']}", ""])
+            lines.append(f"- {file['path']}:{file['line']}")
+            lines.append(f"  - why: {file['reason']}")
+            lines.append(f"  - map: {file['mapKind']}")
+            for section in file["sections"]:
+                lines.append(f"  - {section['line']}-{section['endLine']} {section['name']}: {section['purpose']}")
+            lines.append("")
         lines.append("Limitations: " + "; ".join(result["limitations"]))
     return "\n".join(lines)
 

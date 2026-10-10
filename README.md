@@ -35,12 +35,21 @@ The registered `query` tool accepts:
 {"folder":"/project","dryRun":true}
 ```
 
-Normal queries return at most ten matches with absolute `path`, `line`, `excerpt`,
-`reason`, fused `score`, raw `bm25` and `tfidf` scores. Excerpts are verbatim,
-contiguous source spans bounded to 1200 characters. `line` identifies the strongest
-matching source line, not necessarily the excerpt's first line. Read complete
-recommended files before editing; lexical results are not semantic answers.
-No matching query terms returns an empty match list, not invented recommendations.
+Normal queries return at most ten matches
+with absolute `path`, `line`, `reason`, fused `score` and raw `bm25`/`tfidf`
+scores plus a compact whole-file `sections` map (`mapKind`: `structural` or
+`fallback`) targeting roughly a hundred name/purpose words per file. Human-readable
+maps use bullets; JSON sections have `{line, endLine, name, purpose}` with 1-based
+inclusive ranges covering every physical line contiguously: each section ends
+one line before the next begins. These ranges are navigation partitions, not
+semantic scopes. Purpose length adapts to file density, but all detected section
+names and ranges remain; dense files can exceed the soft target. `structural`
+maps use Python AST or lexical declarations/headings; `fallback` maps use
+blank-line blocks for unsupported, unparsable or unrecognized syntax. Results never contain
+verbatim source bodies. `line` identifies the strongest matching source line,
+not a section boundary. Read the complete recommended files before editing;
+lexical results are not semantic answers. No matching query terms returns an
+empty match list, not invented recommendations.
 
 `--json` emits one document on stdout; progress goes to stderr. Runtime failures
 exit 1 (with `{"error":"..."}` in JSON mode); invalid CLI arguments exit 2.
@@ -80,11 +89,15 @@ without migrating or modifying the old database.
 1. Scan eligible sources and hash their complete bytes, regardless of mtime/size.
 2. Delete rows for missing or hash-mismatched files **before** inserting replacements.
 3. Insert added/changed hashes (all hashes with `--reindex`) in one transaction.
-4. Rescan and verify the complete path/hash map before committing.
-5. Rank freshly read source text, then rescan before returning a query result.
+4. Re-read indexed rows, verify they match the scanned path/hash map, then COMMIT.
+5. Rank the already-scanned in-memory sources; no post-query disk rescan occurs.
 
-Scan errors or detected source races invalidate cached file rows and fail
-explicitly; stale rows never serve as fallback evidence. SQLite uses rollback
+Invalidation remains SHA-256-based, not diff-based; clarify whether any request
+for “different invalidation” means diff-based invalidation before changing it.
+
+Sync failures, including scan errors and detected source races, roll back the
+transaction and preserve previously valid cached rows, then fail explicitly;
+stale rows never serve as fallback evidence. SQLite uses rollback
 journals, a five-second busy timeout and serialized write transactions. The store
 is private (0700 directory, 0600 database). Folder identity mismatch, linked
 store ancestors, linked databases and unsafe sidecars are refused. This is not a
@@ -104,12 +117,14 @@ question stopwords are removed. Relative path terms are computed internally only
 for path boosting; source/store paths in inputs, outputs and SQLite are absolute.
 No source tail is discarded before scoring.
 
-Eligible extensions:
-
-```text
-.py .js .jsx .mjs .cjs .md .ts .tsx .html .css .svelte .txt
-.sh .bash .yaml .yml .toml
-```
+Eligible files are the curated source and build sets in `query_engine/engine.py`:
+C/C++/systems and compiled languages; interpreted, functional and concurrent
+languages; shells, batch and PowerShell; frontend sources and stylesheets; SQL
+and build files; named `Makefile`/`Dockerfile`/`Jenkinsfile`; executable `#!`
+scripts; and the curated Markdown names `README.md`, `AGENTS.md`, `CLAUDE.md`,
+`CONTRIBUTING.md` and `ARCHITECTURE.md`. Data/config formats (`.txt`, `.html`,
+`.json`, `.yaml`, `.toml`) and unlisted Markdown are not indexed, so use explicit
+file reads for them.
 
 Git ignore rules are respected before reading ignored files. Excluded directory
 names:
@@ -119,9 +134,8 @@ node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache
 .ruff_cache .cache .svelte-kit .next dist build coverage hf-cache .tmp
 ```
 
-File/directory symlinks are skipped; the selected folder boundary is never crossed.
-`merges.txt` / `vocab.txt` are excluded only beside regular tokenizer JSON markers.
-Invalid UTF-8 or NUL-containing eligible files fail explicitly.
+File/directory symlinks are skipped; the selected folder boundary is never
+crossed. Invalid UTF-8 or NUL-containing eligible files fail explicitly.
 
 ## Library and checks
 
@@ -135,7 +149,8 @@ index = query_project('/project', index_only=True, reindex=True)
 
 - `query_engine/engine.py`: absolute-path scanning, hash synchronization and freshness.
 - `query_engine/store.py`: minimal SQLite schema, identity and read-only planning.
-- `query_engine/retrieval.py`: deterministic BM25, TF-IDF, RRF and source excerpts.
+- `query_engine/retrieval.py`: deterministic BM25, TF-IDF, RRF and structural map assembly.
+- `query_engine/structure.py`: whole-file section discovery and adaptive purpose sizing.
 - `query_engine/indexer.py`: bounded AGENTS.md discovery and batch hash indexing.
 - `query_engine/__main__.py` / `cli.py`: CLI and presentation.
 - `extensions/sgai-query.ts`: Pi schemas and Python subprocess adapter only.

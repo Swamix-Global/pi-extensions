@@ -9,7 +9,29 @@ from pathlib import Path
 from .retrieval import rank_sources
 from .store import location, open_index, pending_files, read_index, read_rows
 
-SOURCE_EXTENSIONS = set(".py .js .jsx .mjs .cjs .md .ts .tsx .html .css .svelte .txt .sh .bash .yaml .yml .toml".split())
+# Source and build text only; data/config formats (txt, html, json, yaml, toml) and
+# unlisted Markdown stay out of the index so retrieval maps structure, not noise.
+SOURCE_EXTENSIONS = {
+    # C, C++, systems and other compiled languages
+    ".c", ".h", ".cc", ".hh", ".cpp", ".hpp", ".cxx", ".hxx", ".ino", ".m", ".mm",
+    ".cs", ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".groovy", ".swift", ".dart",
+    ".zig", ".nim", ".v", ".asm", ".s", ".f90", ".f95", ".f03", ".f08",
+    # Interpreted, functional and concurrent languages
+    ".py", ".rb", ".rake", ".php", ".pl", ".pm", ".lua", ".r", ".jl", ".ex", ".exs",
+    ".erl", ".hrl", ".clj", ".cljs", ".cljc", ".hs", ".lhs", ".ml", ".mli", ".fs",
+    ".fsi", ".fsx", ".vb", ".elm", ".awk", ".sed", ".tcl",
+    # Shells, batch files and PowerShell
+    ".sh", ".bash", ".zsh", ".ksh", ".dash", ".csh", ".tcsh", ".fish", ".nu", ".bat",
+    ".cmd", ".ps1", ".psm1", ".psd1",
+    # Frontend sources, components and stylesheets
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".svelte", ".vue", ".astro",
+    ".css", ".scss", ".sass", ".less", ".styl",
+    # SQL and build sources
+    ".sql", ".cmake", ".mk", ".mak", ".ninja", ".gradle", ".bazel", ".bzl", ".sbt",
+    ".m4", ".am", ".ac", ".nix", ".pro", ".pri", ".spec", ".dockerfile",
+}
+NAMED_SOURCE_FILES = {"Makefile", "makefile", "GNUmakefile", "Dockerfile", "Jenkinsfile"}
+MARKDOWN_FILENAMES = {"readme.md", "agents.md", "claude.md", "contributing.md", "architecture.md"}
 IGNORED_DIRECTORIES = set("node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache .ruff_cache .cache .svelte-kit .next dist build coverage hf-cache .tmp".split())
 
 
@@ -47,11 +69,18 @@ def scan_sources(root, respect_gitignore=True):
     in_git = respect_gitignore and is_git_repo(root)
     files = {}
 
+    def is_source(entry):
+        """Select curated names, known suffixes or executable extensionless scripts."""
+        if entry.name in NAMED_SOURCE_FILES or entry.name.lower() in MARKDOWN_FILENAMES:
+            return True
+        suffix = Path(entry.name).suffix.lower()
+        if suffix:
+            return suffix in SOURCE_EXTENSIONS
+        return bool(entry.stat(follow_symlinks=False).st_mode & 0o111)
+
     def walk(directory):
         with os.scandir(directory) as iterator:
             entries = sorted(iterator, key=lambda entry: entry.name)
-        tokenizer = any(e.name in ("tokenizer.json", "tokenizer_config.json")
-                        and e.is_file(follow_symlinks=False) for e in entries)
         candidates = []
         for entry in entries:
             if entry.is_symlink():
@@ -59,9 +88,8 @@ def scan_sources(root, respect_gitignore=True):
             if entry.is_dir(follow_symlinks=False):
                 if entry.name not in IGNORED_DIRECTORIES:
                     candidates.append(entry)
-            elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in SOURCE_EXTENSIONS:
-                if not (tokenizer and entry.name in ("merges.txt", "vocab.txt")):
-                    candidates.append(entry)
+            elif entry.is_file(follow_symlinks=False) and is_source(entry):
+                candidates.append(entry)
         ignored = git_ignored(root, [e.path + ("/" if e.is_dir(follow_symlinks=False) else "")
                                      for e in candidates]) if in_git else set()
         for entry in candidates:
@@ -78,6 +106,8 @@ def scan_sources(root, respect_gitignore=True):
                 if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                     raise RuntimeError(f"Source is not a regular file: {path}")
                 raw = handle.read()
+            if not path.suffix and path.name not in NAMED_SOURCE_FILES and not raw.startswith(b"#!"):
+                continue
             content = raw.decode("utf-8")
             if "\0" in content:
                 raise ValueError(f"Source contains binary data: {path}")
@@ -150,5 +180,7 @@ def query_project(folder, question=None, dry_run=False, index_only=False, store_
         ranked = rank_sources(files, question)
         result.update({"answer": f"Found {len(ranked)} lexical matches ranked by BM25 + TF-IDF (RRF)." if ranked
                        else "No lexical matches found; try exact symbols or different search terms.",
-                       "files": ranked, "limitations": ["Lexical retrieval, not semantic inference; read full sources before editing."]})
+                       "files": ranked,
+                       "limitations": ["Heuristic structural maps from lexical BM25 + TF-IDF over a hash-only index; "
+                                       "not semantic inference, so read full sources before editing."]})
     return result

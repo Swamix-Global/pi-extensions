@@ -1,14 +1,15 @@
-"""Deterministic stdlib-only lexical retrieval: corpus BM25 plus sublinear TF-IDF fused by reciprocal rank fusion."""
+"""Deterministic stdlib-only lexical retrieval: corpus BM25 plus sublinear TF-IDF fused by reciprocal rank fusion, with whole-file structural maps."""
 import math
 import os
 import re
 from collections import Counter
 
+from .structure import sections_for
+
 _K1 = 1.2
 _B = 0.75
 _RRF_K = 60
 _PATH_BOOST = 3.0
-_MAX_EXCERPT = 1200
 
 STOPWORDS = frozenset(
     "a an and are as at be but by can could did do does for from had has have how i if in into is it its "
@@ -43,26 +44,8 @@ def _root(paths):
     return os.path.commonpath(dirs) if dirs else ""
 
 
-def _window(lines, best, limit=_MAX_EXCERPT):
-    """Return the largest verbatim contiguous line window around best within limit."""
-    start = end = best
-    total = len(lines[best])
-    while True:
-        grew = False
-        if start > 0 and total + 1 + len(lines[start - 1]) <= limit:
-            start -= 1
-            total += 1 + len(lines[start])
-            grew = True
-        if end + 1 < len(lines) and total + 1 + len(lines[end + 1]) <= limit:
-            end += 1
-            total += 1 + len(lines[end])
-            grew = True
-        if not grew:
-            return "\n".join(lines[start:end + 1])
-
-
 def _locate(content, terms, idf):
-    """Return the 1-based line with the strongest weighted term density and its bounded window."""
+    """Return the 1-based line with the strongest weighted query-term density."""
     lines = content.split("\n")
     best, best_score = 0, 0.0
     for i, line in enumerate(lines):
@@ -76,11 +59,7 @@ def _locate(content, terms, idf):
                 score += idf.get(term, 0.0) * (1 + math.log(count))
         if score > best_score:
             best, best_score = i, score
-    if len(lines[best]) > _MAX_EXCERPT:
-        match = next((m.start() for m in _WORD.finditer(lines[best]) if set(tokenize(m.group())) & set(terms)), 0)
-        start = max(0, min(match - _MAX_EXCERPT // 2, len(lines[best]) - _MAX_EXCERPT))
-        return best + 1, lines[best][start:start + _MAX_EXCERPT]
-    return best + 1, _window(lines, best)
+    return best + 1
 
 
 def rank_sources(files, question, limit=10):
@@ -160,7 +139,8 @@ def rank_sources(files, question, limit=10):
     for path in order[:limit]:
         doc = by_path[path]
         matched = sorted(doc["matched"], key=lambda t: (-idf_bm25.get(t, 0.0), t))
-        line, excerpt = _locate(doc["content"], terms, idf_bm25)
+        line = _locate(doc["content"], terms, idf_bm25)
+        sections, map_kind = sections_for(path, doc["content"])
         reason = f"lexical: {len(matched)}/{len(terms)} query terms"
         if matched[:3]:
             reason += " (" + ", ".join(matched[:3]) + ")"
@@ -168,5 +148,5 @@ def rank_sources(files, question, limit=10):
             reason += "; path term boost"
         reason += f"; best line {line}"
         results.append({"path": path, "score": rrf[path], "bm25": doc["bm25"], "tfidf": doc["tfidf"],
-                        "reason": reason, "excerpt": excerpt, "line": line})
+                        "reason": reason, "line": line, "sections": sections, "mapKind": map_kind})
     return results

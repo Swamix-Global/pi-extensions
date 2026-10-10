@@ -28,6 +28,28 @@ const dryRunSchema = Type.Object({
   sync: syncSchema,
 });
 
+const sectionSchema = Type.Object({
+  line: Type.Number({ description: "1-based first physical line of the section." }),
+  endLine: Type.Number({ description: "1-based inclusive last physical line of the section." }),
+  name: Type.String({ description: "Declaration, heading or grouped construct name." }),
+  purpose: Type.String({ description: "Short intent of the declaration or heading, not a semantic summary; shortened toward the soft per-file word budget." }),
+});
+
+const fileSchema = Type.Object({
+  path: Type.String({ description: "Absolute path of the matched source file." }),
+  reason: Type.String({ description: "Why the file matched: query-term coverage, path boost and strongest line." }),
+  score: Type.Number({ description: "Fused reciprocal-rank-fusion score." }),
+  bm25: Type.Number({ description: "Raw corpus BM25 score." }),
+  tfidf: Type.Number({ description: "Raw sublinear TF-IDF cosine score." }),
+  line: Type.Number({ description: "1-based strongest matching source line, not a section boundary." }),
+  mapKind: Type.Union([Type.Literal("structural"), Type.Literal("fallback")], {
+    description: "Structural when AST or lexical declaration detection applies; fallback blank-line blocks for unsupported or unparsable syntax.",
+  }),
+  sections: Type.Array(sectionSchema, {
+    description: "Compact whole-file map: contiguous sections covering every physical line, never verbatim bodies; names and ranges are always kept while purposes shorten toward a soft roughly-hundred-word per-file allowance.",
+  }),
+});
+
 const resultSchema = Type.Object({
   dryRun: Type.Literal(false, { description: "False for a normal query result." }),
   folder: Type.String({ description: "Canonical absolute folder that was indexed." }),
@@ -35,28 +57,42 @@ const resultSchema = Type.Object({
   indexed: Type.Number({ description: "Indexed source file count." }),
   sync: syncSchema,
   answer: Type.String({ description: "Local lexical retrieval result, not a generated semantic answer." }),
-  files: Type.Array(Type.Object({
-    path: Type.String(),
-    reason: Type.String(),
-    score: Type.Number(),
-    bm25: Type.Number(),
-    tfidf: Type.Number(),
-    line: Type.Number(),
-    excerpt: Type.String(),
-  })),
+  files: Type.Array(fileSchema),
   limitations: Type.Array(Type.String()),
 });
+
+// Render every nonblank line as a bullet: file path/reason plus indented line-range/name/purpose sections.
+function renderResult(result: any): string {
+  const lines = [
+    `- Folder: ${result.folder}`,
+    `- Store: ${result.database}`,
+    `- Index: ${result.indexed} files (${result.sync.updated} updated, ${result.sync.deleted} deleted, ${result.sync.unchanged} unchanged).`,
+    `- ${result.answer}`,
+    "- File maps (in order):",
+  ];
+  for (const file of result.files) {
+    lines.push(`- ${file.path}:${file.line}`);
+    lines.push(`  - why: ${file.reason}`);
+    lines.push(`  - map: ${file.mapKind}`);
+    for (const section of file.sections) {
+      lines.push(`  - ${section.line}-${section.endLine} ${section.name}: ${section.purpose}`);
+    }
+  }
+  lines.push(`- Limitations: ${result.limitations.join("; ")}`);
+  return lines.join("\n");
+}
 
 export default function queryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "query",
     label: "Project Query",
-    description: "Preferred first tool for codebase discovery. Requires an absolute folder path. Synchronizes a minimal per-folder SQLite cache of absolute file paths and SHA-256 content hashes, deleting stale rows before reindexing. Ranks fresh full source text locally with corpus BM25 + TF-IDF fused by RRF; returns up to ten matching absolute paths and verbatim excerpts. No summarizer, models, API keys or network. Use dryRun:true to preview hash changes without writes. Never edits sources; read complete files before editing.",
-    promptSnippet: "Find relevant source files locally with BM25 + TF-IDF and hash-only freshness.",
+    description: "Preferred codebase discovery tool; requires an absolute folder. Scans source/build files (including C++, batch and shell) plus named project Markdown; excludes data/config and incidental prose. Ranks fresh full text using BM25 + TF-IDF/RRF and returns up to ten compact bullet maps: absolute path, section line ranges, names and purposes. Targets about 100 name/purpose words per file without dropping detected sections; unsupported syntax uses labeled fallback blocks. No source-body excerpts, models or network. Preserves SHA-256-only SQLite freshness and stale-row replacement. dryRun:true previews changes without writes. Maps are navigation aids, not semantic answers; read complete files before editing.",
+    promptSnippet: "Find relevant source files locally with BM25 + TF-IDF and compact whole-file maps.",
     promptGuidelines: [
       "Give query highest preference for codebase exploration, file discovery and project-level questions, before exploratory read/find/grep calls. Then read the recommended files for exact evidence and before editing. Explicit file reads and non-codebase files may go directly to read.",
       "Always pass an absolute folder path; relative paths are rejected. dryRun:true previews hash changes and the absolute store path without writes; question may be omitted.",
-      "query returns lexical matches and bounded source excerpts, not a semantic model answer. Read the complete recommended files before editing. If query fails, report it; never use stale rows as evidence.",
+      "query returns compact whole-file structural maps of roughly a hundred words per file, never verbatim source bodies and never a semantic model answer. Read the complete recommended files before editing. If query fails, report it; never use stale rows as evidence.",
+      "The index holds source and build text plus curated project Markdown only; data, config and unlisted Markdown are absent, so use explicit file reads for them.",
     ],
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     parameters: Type.Object({
@@ -88,7 +124,7 @@ export default function queryExtension(pi: ExtensionAPI) {
       const result = JSON.parse(process.stdout);
       const text = dryRun
         ? `Folder: ${result.folder}\nStore: ${result.database}\nDry run: ${result.eligible} eligible files\n${JSON.stringify(result.pending, null, 2)}`
-        : `Folder: ${result.folder}\nStore: ${result.database}\n${result.answer}\n\nFiles to read (in order):\n${result.files.map((file) => `${file.path}:${file.line}\nWhy read: ${file.reason}\nExcerpt:\n${file.excerpt}`).join("\n\n")}\n\nLimitations: ${result.limitations.join("; ")}`;
+        : renderResult(result);
       return {
         content: [{ type: "text", text }],
         details: result,
