@@ -47,20 +47,22 @@ tool `details` remain lexical and unchanged. JSON sections have
 physical line contiguously. These are navigation partitions, not semantic
 scopes; maps are still available to programmatic callers and the CLI.
 
-The Pi adapter's normal text uses each ranked absolute path followed by
+The Pi adapter's normal text prints each ranked absolute path once, followed by
 zero-based, half-open 100-line chapters (`0-100`, `100-200`, and so on), each
-summarized in plain prose with a meaningful sizing hint of about 100 words.
-The final chapter may be shorter. It reads each source without following
+with one prose paragraph. About 100 words is a sizing hint, not a target to count
+toward; shorter chapters may be shorter. It reads each source without following
 symlinks, hashes the bytes, and compares that SHA-256 with the existing SQLite
 row through a read-only connection before generation. Stale snapshots, symlink
-sources, missing LocalAI responses, and responses without final token usage fail
-explicitly; summaries are never presented for bytes other than the indexed
-snapshot. The adapter dynamically imports
+sources, missing final content, malformed or empty summaries, and responses
+without final token usage fail explicitly. The adapter dynamically imports
 `$PI_CODING_AGENT_DIR/lib/local-ai.mjs` (default `~/.pi/agent/lib/local-ai.mjs`)
-and calls it with thinking enabled, low reasoning, streaming, at most four
-concurrent calls, and a 2048-token cap. Progress labels per-call stream rates as
-provisional; final throughput uses server-reported output tokens including
-reasoning, divided by generation wall time. The Python CLI does not generate summaries.
+and calls it with a strict JSON schema requiring one nonempty `summary` field,
+thinking enabled, low reasoning, streaming, at most four concurrent calls, and
+a 2048-token cap. It parses only final `onUsage` message content after removing
+tagged thinking; the LocalAI return string is ignored because it may fall back
+to reasoning. Progress labels per-call stream rates as provisional. The only
+text footer reports aggregate generation time and server-reported output tokens
+including reasoning per second. The Python CLI does not generate summaries.
 
 Dry runs remain write-free and skip inference. Canonical `.pi/subagents/contracts`
 queries remain deterministic: the adapter returns ranked paths without model
@@ -200,10 +202,11 @@ npm test             # Three real CLI scenarios and one real Pi extension scenar
 
 Functional tests cover retrieval/read-only preview, hash-sync/reindex,
 migration/failure recovery, and the real Pi adapter. The extension test uses a
-loopback streaming server to verify LocalAI request options, four-call
-concurrency, chapter coverage and order, usage, stale/symlink refusals, explicit
-inference failures, and write-free dry runs. It uses disposable folders and a
-read-only SQLite index; no external vector database or credentials are needed.
+loopback streaming server to verify strict structured replies, low-reasoning
+request options, four-call concurrency, once-per-file chapter rendering,
+coverage and order, usage, reasoning-only/malformed/empty reply refusal,
+stale/symlink refusals, and write-free dry runs. It uses disposable folders and
+a read-only SQLite index; no external vector database or credentials are needed.
 
 To run a bounded live generation against GigaTrader with the configured LocalAI
 backend, use:
@@ -218,5 +221,6 @@ node tests/extension.test.mjs
 The opt-in runner saves the generated text and a JSON throughput report under
 `/tmp/query-chapter-live-*.txt` and `*.json`, and prints both paths. The report
 contains selected ranked paths, chapter count, generation and query wall times,
-per-call final token totals, aggregate server-token throughput and progress updates. Use
-`/reload` after changing the extension in an existing Pi session.
+aggregate final usage and server-token throughput, plus progress estimates
+labelled provisional. Use `/reload` after changing the extension in an existing
+Pi session.

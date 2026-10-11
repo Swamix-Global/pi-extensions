@@ -33,22 +33,33 @@ for (const key of ["QUERY_TEST_MUTATE_SOURCE", "QUERY_TEST_SYMLINK_SOURCE", "QUE
 const wordCount = (text) => text.trim().split(/\s+/).filter(Boolean).length;
 const assertSchemaAgreement = (value, keys) => assert.deepEqual(Object.keys(value).sort(), keys);
 const assertChapterCoverage = (text, files, lineCounts) => {
-  const body = text.split("\n\nGeneration completed ")[0];
+  const footerAt = text.indexOf("\n\nGeneration completed ");
+  const body = footerAt < 0 ? text : text.slice(0, footerAt);
   const blocks = body.split("\n\n");
   let cursor = 0, chapterCount = 0;
   for (const file of files) {
     const count = lineCounts.get(file.path);
+    assert.equal(blocks[cursor++], file.path, "each file path appears once in lexical rank order");
     for (let start = 0; start < count; start += 100) {
       const end = Math.min(start + 100, count);
-      assert.equal(blocks[cursor++], file.path, "chapter files must preserve lexical rank order");
-      assert.equal(blocks[cursor++], `${start}-${end}`, `missing chapter ${file.path} ${start}-${end}`);
-      assert.ok(wordCount(blocks[cursor++]) >= 90 && wordCount(blocks[cursor - 1]) <= 110,
-        `chapter summary should be about 100 words, got ${wordCount(blocks[cursor - 1])}`);
+      const [range, ...summaryLines] = blocks[cursor++].split("\n");
+      const summary = summaryLines.join("\n");
+      assert.equal(range, `${start}-${end}`, `missing chapter ${file.path} ${start}-${end}`);
+      if (end - start === 100) {
+        assert.ok(wordCount(summary) >= 90 && wordCount(summary) <= 110,
+          `full chapter sizing hint should be about 100 words, got ${wordCount(summary)}`);
+      } else {
+        assert.ok(wordCount(summary) > 0 && wordCount(summary) < 90,
+          `short final chapters may have shorter summaries, got ${wordCount(summary)} words`);
+      }
       chapterCount += 1;
     }
   }
   assert.equal(cursor, blocks.length, "all chapter text should be covered exactly once");
   assert.ok(chapterCount > 0);
+  if (footerAt >= 0) {
+    assert.match(text.slice(footerAt + 2), /^Generation completed \d+ chapters in [\d.]+ seconds wall time; \d+ server-reported output tokens including reasoning \([\d.]+ tokens per second\)\.$/);
+  }
 };
 
 const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "query-extension-")));
@@ -103,7 +114,6 @@ try {
         active -= 1;
         return;
       }
-      const summary = "This chapter describes the source implementation and its relationship to surrounding code. ".repeat(8).trim();
       const usage = {
         prompt_tokens: 20,
         completion_tokens: 103,
@@ -111,7 +121,19 @@ try {
         completion_tokens_details: { reasoning_tokens: 7 },
       };
       response.setHeader("content-type", "text/event-stream");
-      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: summary } }] })}\n\n`);
+      if (requestMode === "reasoning-only") {
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "PRIVATE_REASONING_SENTINEL: drafting a fallback answer." } }] })}\n\n`);
+      } else {
+        const prompt = requestBodies.at(-1).messages[1].content;
+        const [, start, end] = prompt.match(/Zero-based half-open line range: (\d+)-(\d+)/) ?? [];
+        const shortChapter = Number(end) - Number(start) < 100;
+        const generatedSummary = shortChapter ? "This short source chapter ends the file."
+          : "This chapter describes the source implementation and its relationship to surrounding code. ".repeat(8).trim();
+        const summary = requestMode === "malformed-json" ? "{not-json"
+          : requestMode === "empty-summary" ? JSON.stringify({ summary: "   " })
+            : JSON.stringify({ summary: generatedSummary });
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: summary } }] })}\n\n`);
+      }
       response.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage })}\n\n`);
       response.end("data: [DONE]\n\n");
       active -= 1;
@@ -189,9 +211,8 @@ try {
   assert.equal(first.usage.output, 8 * 103, "server completion totals include reasoning tokens");
   assert.equal(first.usage.reasoning, 8 * 7);
   assert.equal(first.usage.totalTokens, 8 * 123);
-  assert.match(first.content[0].text, /Server-token aggregate: 824 final output tokens including reasoning/);
-  assert.match(first.content[0].text, /Per-call final totals: chapter 1 \(0-100\) used 103 server-reported output tokens including reasoning in [\d.]+ seconds with \d+ progress updates/);
-  assert.match(first.content[0].text, /Provisional stream rate updates:/);
+  assert.match(first.content[0].text, /Generation completed 8 chapters in [\d.]+ seconds wall time; 824 server-reported output tokens including reasoning \([\d.]+ tokens per second\)\./);
+  assert.doesNotMatch(first.content[0].text, /Per-call final totals|Provisional stream rate updates/);
   assert.ok(updates.some((text) => text.includes("Provisional per-call stream-rate")));
   assert.ok(updates.some((text) => text.includes("Server-reported final output tokens")));
   assert.equal(maximumActive, 4, "chapter calls must use four concurrent LocalAI streams");
@@ -209,6 +230,14 @@ try {
     assert.equal(body.reasoning_effort, "low");
     assert.equal(body.chat_template_kwargs.enable_thinking, true);
     assert.equal(body.chat_template_kwargs.reasoning_effort, "low");
+    assert.equal(body.response_format.type, "json_schema");
+    assert.equal(body.response_format.json_schema.strict, true);
+    assert.deepEqual(Object.keys(body.response_format.json_schema.schema.properties), ["summary"]);
+    assert.deepEqual(body.response_format.json_schema.schema.required, ["summary"]);
+    assert.equal(body.response_format.json_schema.schema.properties.summary.minLength, 1);
+    assert.equal(body.response_format.json_schema.schema.additionalProperties, false);
+    assert.match(body.messages[1].content, /about 100 words as a sizing hint/);
+    assert.match(body.messages[1].content, /Do not count words or discuss drafting/);
   }
 
   // The Python boundary must preserve the original query bytes, and the adapter
@@ -253,6 +282,16 @@ try {
   await assert.rejects(execute({ folder, question: "handler" }), /LocalAI did not return a summary/);
   requestMode = "missing-usage";
   await assert.rejects(execute({ folder, question: "handler" }), /omitted final server token usage/);
+  requestMode = "reasoning-only";
+  await assert.rejects(execute({ folder, question: "handler" }), (error) => {
+    assert.match(error.message, /did not return final structured summary content/);
+    assert.doesNotMatch(error.message, /PRIVATE_REASONING_SENTINEL/);
+    return true;
+  });
+  requestMode = "malformed-json";
+  await assert.rejects(execute({ folder, question: "handler" }), /malformed or empty structured summary/);
+  requestMode = "empty-summary";
+  await assert.rejects(execute({ folder, question: "handler" }), /malformed or empty structured summary/);
   requestMode = "success";
 
   // The same AbortSignal passed to execute cancels active LocalAI requests.
@@ -296,9 +335,8 @@ try {
     const reportPath = outputPath.replace(/\.txt$/, ".json");
     const output = live.content[0].text;
     const chapters = [...output.matchAll(/^\d+-\d+$/gm)].length;
-    const generation = output.match(/Generation completed (\d+) chapters in ([\d.]+) seconds wall time\./);
-    const aggregate = output.match(/Server-token aggregate: (\d+) final output tokens including reasoning, or ([\d.]+) tokens per second/);
-    assert.ok(generation && aggregate, "live output must expose generation and server-token throughput metrics");
+    const generation = output.match(/Generation completed (\d+) chapters in ([\d.]+) seconds wall time; (\d+) server-reported output tokens including reasoning \(([\d.]+) tokens per second\)\./);
+    assert.ok(generation, "live output must expose the aggregate generation timing and server-token throughput footer");
     const report = {
       folder,
       question,
@@ -308,9 +346,8 @@ try {
       queryWallMs,
       generationWallSeconds: Number(generation[2]),
       usage: live.usage,
-      serverOutputTokensIncludingReasoning: Number(aggregate[1]),
-      aggregateServerTokensPerSecond: Number(aggregate[2]),
-      perCallFinalTotals: output.match(/Per-call final totals: ([\s\S]*?)\n\nProvisional stream rate updates:/)?.[1] ?? "not available",
+      serverOutputTokensIncludingReasoning: Number(generation[3]),
+      aggregateServerTokensPerSecond: Number(generation[4]),
       progressUpdates: progress,
       provisionalRateLabels: progress.filter((text) => text.includes("Provisional per-call stream-rate")),
     };
