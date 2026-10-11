@@ -228,7 +228,7 @@ try {
     assert.equal(body.max_tokens, 2048);
     assert.equal(body.model, "chapter-test-model");
     assert.equal(body.reasoning_effort, "low");
-    assert.equal(body.chat_template_kwargs.enable_thinking, true);
+    assert.equal(body.chat_template_kwargs.enable_thinking, false);
     assert.equal(body.chat_template_kwargs.reasoning_effort, "low");
     assert.equal(body.response_format.type, "json_schema");
     assert.equal(body.response_format.json_schema.strict, true);

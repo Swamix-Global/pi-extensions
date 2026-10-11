@@ -57,8 +57,13 @@ sources, missing final content, malformed or empty summaries, and responses
 without final token usage fail explicitly. The adapter dynamically imports
 `$PI_CODING_AGENT_DIR/lib/local-ai.mjs` (default `~/.pi/agent/lib/local-ai.mjs`)
 and calls it with a strict JSON schema requiring one nonempty `summary` field,
-thinking enabled, low reasoning, streaming, at most four concurrent calls, and
-a 2048-token cap. Both system and chapter prompts state the exact JSON object
+hidden thinking disabled (`enable_thinking:false`) while low reasoning stays on
+the wire, streaming, at most four concurrent calls, and a 2048-token cap. That
+choice is measured: this serving stack installs no reasoning parser, so with
+thinking enabled constrained decoding stalled in raw-newline whitespace to the
+token cap (invalid JSON such as `{"` followed by a literal control character)
+and often returned placeholder prose, while thinking disabled returned valid,
+real chapter summaries. Both system and chapter prompts state the exact JSON object
 shape and require only finished prose in `summary`; it parses only final
 `onUsage` message content after removing tagged thinking. The LocalAI return
 string is ignored because it may fall back to reasoning. Progress labels
