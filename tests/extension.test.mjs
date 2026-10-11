@@ -30,7 +30,6 @@ const restoreEnvironment = () => {
   }
 };
 for (const key of ["QUERY_TEST_MUTATE_SOURCE", "QUERY_TEST_SYMLINK_SOURCE", "QUERY_TEST_SYMLINK_TARGET"]) delete process.env[key];
-const wordCount = (text) => text.trim().split(/\s+/).filter(Boolean).length;
 const assertSchemaAgreement = (value, keys) => assert.deepEqual(Object.keys(value).sort(), keys);
 const assertChapterCoverage = (text, files, lineCounts) => {
   const footerAt = text.indexOf("\n\nGeneration completed ");
@@ -45,13 +44,7 @@ const assertChapterCoverage = (text, files, lineCounts) => {
       const [range, ...summaryLines] = blocks[cursor++].split("\n");
       const summary = summaryLines.join("\n");
       assert.equal(range, `${start}-${end}`, `missing chapter ${file.path} ${start}-${end}`);
-      if (end - start === 100) {
-        assert.ok(wordCount(summary) >= 90 && wordCount(summary) <= 110,
-          `full chapter sizing hint should be about 100 words, got ${wordCount(summary)}`);
-      } else {
-        assert.ok(wordCount(summary) > 0 && wordCount(summary) < 90,
-          `short final chapters may have shorter summaries, got ${wordCount(summary)} words`);
-      }
+      assert.ok(summary.trim(), `chapter ${file.path} ${start}-${end} should have a non-empty summary`);
       chapterCount += 1;
     }
   }
@@ -238,8 +231,12 @@ try {
     assert.equal(body.response_format.json_schema.schema.additionalProperties, false);
     assert.match(body.messages[0].content, /one JSON object of the form {"summary":"finished chapter prose"}/);
     assert.match(body.messages[1].content, /Return exactly one JSON object shaped as {"summary":"finished chapter prose"}/);
-    assert.match(body.messages[1].content, /about 100 words as a sizing hint/);
-    assert.match(body.messages[1].content, /Do not count words or discuss drafting/);
+    assert.match(body.messages[0].content, /without claiming this query executed it or runtime success was observed/);
+    assert.match(body.messages[1].content, /aiming close to 100 words for a full 100-line chapter/);
+    assert.match(body.messages[1].content, /evident purpose, important inputs and outputs, control flow, dependencies visible in this chapter, and meaningful side effects or error paths where present/);
+    assert.match(body.messages[1].content, /without claiming this query ran it; avoid repetitive execution disclaimers/);
+    assert.match(body.messages[1].content, /Do not infer absent imports, unseen definitions, or runtime success/);
+    assert.match(body.messages[1].content, /Do not pad, count words, or discuss drafting/);
   }
 
   // The Python boundary must preserve the original query bytes, and the adapter

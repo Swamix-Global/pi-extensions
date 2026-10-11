@@ -49,8 +49,11 @@ scopes; maps are still available to programmatic callers and the CLI.
 
 The Pi adapter's normal text prints each ranked absolute path once, followed by
 zero-based, half-open 100-line chapters (`0-100`, `100-200`, and so on), each
-with one prose paragraph. About 100 words is a sizing hint, not a target to count
-toward; shorter chapters may be shorter. It reads each source without following
+with one prose paragraph. Full chapters aim close to 100 words as a sizing hint,
+not a count target; short final fragments may be shorter. Summaries explain
+purpose, inputs and outputs, control flow, visible dependencies, and meaningful
+side effects or error paths. They describe code behavior when invoked without
+claiming the query ran it. The adapter reads each source without following
 symlinks, hashes the bytes, and compares that SHA-256 with the existing SQLite
 row through a read-only connection before generation. Stale snapshots, symlink
 sources, missing final content, malformed or empty summaries, and responses
