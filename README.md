@@ -3,8 +3,10 @@
 Local source discovery using **BM25 + sublinear TF-IDF cosine**, combined with
 reciprocal rank fusion (RRF). Python 3.10+ standard library implements scanning,
 sync, retrieval, CLI and reinstall; a thin TypeScript adapter registers the tool
-through Pi's supported API. No summarizer, inference, API keys, embeddings,
-Qdrant or network requests. Full source is read locally; only file hashes persist.
+through Pi's supported API. Ranking stays lexical and deterministic. The Pi
+adapter additionally summarizes retrieved source chapters with the configured
+LocalAI backend; it requires no API key, embeddings or external vector database.
+Full source is read locally; only file hashes persist in the query index.
 
 ## Run and reinstall
 
@@ -36,21 +38,36 @@ The registered `query` tool accepts:
 {"folder":"/project","dryRun":true}
 ```
 
-Normal queries return at most ten retrieval candidates
-with absolute `path`, `line`, `reason`, fused `score` and raw `bm25`/`tfidf`
-scores plus a compact whole-file `sections` map (`mapKind`: `structural` or
-`fallback`) targeting roughly a hundred name/purpose words per file. Human-readable
-maps use bullets; JSON sections have `{line, endLine, name, purpose}` with 1-based
-inclusive ranges covering every physical line contiguously: each section ends
-one line before the next begins. These ranges are navigation partitions, not
-semantic scopes. Purpose length adapts to file density, but all detected section
-names and ranges remain; dense files can exceed the soft target. `structural`
-maps use Python AST or lexical declarations/headings; `fallback` maps use
-blank-line blocks for unsupported, unparsable or unrecognized syntax. Results never contain
-verbatim source bodies. `line` identifies the strongest matching source line,
-not a section boundary. Read the complete recommended files before editing;
-lexical results are not semantic answers. No matching query terms returns an
-empty match list, not invented recommendations.
+Normal queries return at most ten retrieval candidates with absolute `path`,
+`line`, `reason`, fused `score` and raw `bm25`/`tfidf` scores plus a compact
+whole-file `sections` map (`mapKind`: `structural` or `fallback`). Python
+ranking, result schema, `structuredContent.files` paths and order, and native
+tool `details` remain lexical and unchanged. JSON sections have
+`{line, endLine, name, purpose}` with 1-based inclusive ranges covering every
+physical line contiguously. These are navigation partitions, not semantic
+scopes; maps are still available to programmatic callers and the CLI.
+
+The Pi adapter's normal text uses each ranked absolute path followed by
+zero-based, half-open 100-line chapters (`0-100`, `100-200`, and so on), each
+summarized in plain prose with a meaningful sizing hint of about 100 words.
+The final chapter may be shorter. It reads each source without following
+symlinks, hashes the bytes, and compares that SHA-256 with the existing SQLite
+row through a read-only connection before generation. Stale snapshots, symlink
+sources, missing LocalAI responses, and responses without final token usage fail
+explicitly; summaries are never presented for bytes other than the indexed
+snapshot. The adapter dynamically imports
+`$PI_CODING_AGENT_DIR/lib/local-ai.mjs` (default `~/.pi/agent/lib/local-ai.mjs`)
+and calls it with thinking enabled, low reasoning, streaming, at most four
+concurrent calls, and a 2048-token cap. Progress labels per-call stream rates as
+provisional; final throughput uses server-reported output tokens including
+reasoning, divided by generation wall time. The Python CLI does not generate summaries.
+
+Dry runs remain write-free and skip inference. Canonical `.pi/subagents/contracts`
+queries remain deterministic: the adapter returns ranked paths without model
+generation, while the structured result retains every ranked file and section.
+Read complete recommended files before editing; lexical results are not
+semantic answers. No matching query terms returns an empty match list, not
+invented recommendations.
 
 `--json` emits one document on stdout; progress goes to stderr. Runtime failures
 exit 1 (with `{"error":"..."}` in JSON mode); invalid CLI arguments exit 2.
@@ -172,7 +189,7 @@ index = query_project('/project', index_only=True, reindex=True)
 - `query_engine/structure.py`: whole-file section discovery and adaptive purpose sizing.
 - `query_engine/indexer.py`: bounded AGENTS.md discovery and batch hash indexing.
 - `query_engine/__main__.py` / `cli.py`: CLI and presentation.
-- `extensions/sgai-query.ts`: Pi schemas and Python subprocess adapter only.
+- `extensions/sgai-query.ts`: Pi schemas, Python subprocess adapter, verified source snapshots and LocalAI chapter summaries.
 - `reinstall.py`: supported package installation and absolute declaration.
 
 From `/home/ubuntu/src/sgai-pi/query-engine`:
@@ -181,4 +198,25 @@ From `/home/ubuntu/src/sgai-pi/query-engine`:
 npm test             # Three real CLI scenarios and one real Pi extension scenario
 ```
 
-Only functional tests remain: retrieval/read-only preview, hash-sync/reindex, migration/failure recovery, and the Pi adapter. They use disposable folders, real subprocesses and SQLite, with no mocks, unit tests, inference server, external vector database or credentials.
+Functional tests cover retrieval/read-only preview, hash-sync/reindex,
+migration/failure recovery, and the real Pi adapter. The extension test uses a
+loopback streaming server to verify LocalAI request options, four-call
+concurrency, chapter coverage and order, usage, stale/symlink refusals, explicit
+inference failures, and write-free dry runs. It uses disposable folders and a
+read-only SQLite index; no external vector database or credentials are needed.
+
+To run a bounded live generation against GigaTrader with the configured LocalAI
+backend, use:
+
+```sh
+PI_QUERY_CHAPTER_LIVE=1 \
+PI_QUERY_CHAPTER_FOLDER=/home/ubuntu/src/GigaTrader-v2 \
+PI_QUERY_CHAPTER_QUESTION='GigaTrader architecture ranking workers predictors analytics frontend backend' \
+node tests/extension.test.mjs
+```
+
+The opt-in runner saves the generated text and a JSON throughput report under
+`/tmp/query-chapter-live-*.txt` and `*.json`, and prints both paths. The report
+contains selected ranked paths, chapter count, generation and query wall times,
+per-call final token totals, aggregate server-token throughput and progress updates. Use
+`/reload` after changing the extension in an existing Pi session.
