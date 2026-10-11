@@ -236,6 +236,8 @@ try {
     assert.deepEqual(body.response_format.json_schema.schema.required, ["summary"]);
     assert.equal(body.response_format.json_schema.schema.properties.summary.minLength, 1);
     assert.equal(body.response_format.json_schema.schema.additionalProperties, false);
+    assert.match(body.messages[0].content, /one JSON object of the form {"summary":"finished chapter prose"}/);
+    assert.match(body.messages[1].content, /Return exactly one JSON object shaped as {"summary":"finished chapter prose"}/);
     assert.match(body.messages[1].content, /about 100 words as a sizing hint/);
     assert.match(body.messages[1].content, /Do not count words or discuss drafting/);
   }

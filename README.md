@@ -58,11 +58,13 @@ without final token usage fail explicitly. The adapter dynamically imports
 `$PI_CODING_AGENT_DIR/lib/local-ai.mjs` (default `~/.pi/agent/lib/local-ai.mjs`)
 and calls it with a strict JSON schema requiring one nonempty `summary` field,
 thinking enabled, low reasoning, streaming, at most four concurrent calls, and
-a 2048-token cap. It parses only final `onUsage` message content after removing
-tagged thinking; the LocalAI return string is ignored because it may fall back
-to reasoning. Progress labels per-call stream rates as provisional. The only
-text footer reports aggregate generation time and server-reported output tokens
-including reasoning per second. The Python CLI does not generate summaries.
+a 2048-token cap. Both system and chapter prompts state the exact JSON object
+shape and require only finished prose in `summary`; it parses only final
+`onUsage` message content after removing tagged thinking. The LocalAI return
+string is ignored because it may fall back to reasoning. Progress labels
+per-call stream rates as provisional; only the final footer reports aggregate
+generation time and server-reported output tokens including reasoning per
+second. The Python CLI does not generate summaries.
 
 Dry runs remain write-free and skip inference. Canonical `.pi/subagents/contracts`
 queries remain deterministic: the adapter returns ranked paths without model
