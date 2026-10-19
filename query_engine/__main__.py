@@ -1,68 +1,45 @@
-"""Hash-only CLI: JSON on stdout, progress on stderr, no network or inference."""
+"""CLI: JSON or YAML on stdout, progress on stderr; local fanout evidence only."""
 import argparse
 import json
 import sys
 
-from .engine import query_project
-from .indexer import auto_index_all_agent_folders
+import yaml
+
+from .engine import canonical, enumerate_files
+from .fanout import compile_evidence
 
 
-def format_result(result):
-    """Present absolute paths and nested bullet-only structural file maps."""
-    lines = [f"Folder: {result['folder']}", f"Store: {result['database']}"]
-    sync = result["sync"]
-    lines.append(f"Index: {result['indexed']} files; {sync['updated']} updated, {sync['deleted']} deleted, {sync['unchanged']} unchanged.")
-    if result.get("dryRun"):
-        lines.append("Dry run: no writes or network.")
-        for kind, paths in result["pending"].items():
-            lines.append(f"{kind}: {', '.join(paths) or '(none)'}")
-    elif result.get("indexOnly"):
-        lines.append("Indexed file hashes locally; no summaries or model calls.")
-    else:
-        lines.extend(["", result["answer"], "", "File maps (in order):"])
-        for file in result["files"]:
-            lines.append(f"- {file['path']}:{file['line']}")
-            lines.append(f"  - why: {file['reason']}")
-            lines.append(f"  - map: {file['mapKind']}")
-            for section in file["sections"]:
-                lines.append(f"  - {section['line']}-{section['endLine']} {section['name']}: {section['purpose']}")
-            lines.append("")
-        lines.append("Limitations: " + "; ".join(result["limitations"]))
-    return "\n".join(lines)
+def _yaml(document):
+    """Unlimited-width YAML: the terminal wraps naturally, we never re-flow."""
+    return yaml.safe_dump(document, sort_keys=False, allow_unicode=True, width=1000000)
 
 
 def main():
-    """Run a query, no-write preview or explicit hash-index rebuild."""
-    parser = argparse.ArgumentParser(description="Local hash-only query engine: BM25 + TF-IDF with RRF")
-    parser.add_argument("--folder", help="Absolute source folder path")
-    parser.add_argument("--question")
-    parser.add_argument("--auto-all", action="store_true", help="Index AGENTS.md folders under /home/ubuntu/src")
-    modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--dry-run", action="store_true", help="Offline no-write hash plan")
-    modes.add_argument("--index-only", action="store_true", help="Sync file hashes without retrieval")
-    parser.add_argument("--reindex", action="store_true", help="Delete all cached rows and override with current source hashes")
+    """Enumerate eligible files or compile one fanout evidence packet."""
+    parser = argparse.ArgumentParser(
+        description="Fanout evidence engine: deterministic windows, parallel local extraction, verbatim-validated quotes")
+    parser.add_argument("--folder", required=True, help="Absolute source folder path")
+    parser.add_argument("--question", help="One concrete question for the evidence fanout")
+    parser.add_argument("--list", action="store_true", help="Enumerate eligible files; no model calls")
+    parser.add_argument("--windows", type=int, default=12, help="Window budget (1-24, default 12)")
+    parser.add_argument("--concurrency", type=int, default=12, help="Parallel requests (1-32, default 12)")
     parser.add_argument("--json", action="store_true", help="One JSON document on stdout")
     args = parser.parse_args()
-    if args.dry_run and (args.reindex or args.auto_all):
-        parser.error("--dry-run cannot be combined with --reindex or --auto-all")
-    if args.auto_all and (args.folder or args.question):
-        parser.error("--auto-all cannot be combined with --folder or --question")
-    if not args.auto_all:
-        if not args.folder or not args.folder.strip():
-            parser.error("--folder must be an absolute path unless --auto-all is specified")
-        if not args.dry_run and not args.index_only and not (args.question and args.question.strip()):
-            parser.error("--question is required unless --dry-run or --index-only")
+    if not args.list and not (args.question and args.question.strip()):
+        parser.error("--question is required unless --list is given")
     progress = lambda text: print(text, file=sys.stderr, flush=True)
     try:
-        if args.auto_all:
-            result = auto_index_all_agent_folders(progress=progress, reindex=args.reindex)
-            failed = any("error" in entry for entry in result)
-            print(json.dumps(result, ensure_ascii=False) if args.json else "\n".join(
-                f"{entry['folder']}: {entry['error']}" if "error" in entry else format_result(entry) for entry in result))
-            return int(failed)
-        result = query_project(args.folder, args.question, dry_run=args.dry_run, index_only=args.index_only,
-                               reindex=args.reindex, progress=progress)
-        print(json.dumps(result, ensure_ascii=False) if args.json else format_result(result))
+        if args.list:
+            result = enumerate_files(args.folder)
+        else:
+            result = compile_evidence(args.folder, args.question, windows_limit=args.windows,
+                                      concurrency=args.concurrency, progress=progress)
+        if args.json:
+            document = dict(result)
+            document["yaml"] = _yaml(result)
+            print(json.dumps(document, ensure_ascii=False))
+        else:
+            print(_yaml(result))
     except Exception as error:
         if args.json:
             print(json.dumps({"error": str(error)}))

@@ -1,16 +1,18 @@
-"""Absolute-path source scanning, hash-only sync and local lexical retrieval."""
+"""Absolute-path source scanning for the fanout evidence engine.
+
+Reads every eligible UTF-8 source with SHA-256 byte hashes and absolute paths.
+No index, no embeddings, no network: fanout windows are scored from these
+scans directly, so nothing here depends on external services.
+"""
 import hashlib
 import os
 import stat
 import subprocess
-from contextlib import closing
 from pathlib import Path
 
-from .retrieval import rank_sources
-from .store import location, open_index, pending_files, read_index, read_rows
-
 # Source and build text only; data/config formats (txt, html, json, yaml, toml) and
-# unlisted Markdown stay out of the index so retrieval maps structure, not noise.
+# unlisted Markdown stay out so evidence maps code structure, not noise.
+# Contract scope overrides below add contract Markdown and YAML.
 SOURCE_EXTENSIONS = {
     # C, C++, systems and other compiled languages
     ".c", ".h", ".cc", ".hh", ".cpp", ".hpp", ".cxx", ".hxx", ".ino", ".m", ".mm",
@@ -75,8 +77,8 @@ def git_ignored(root, paths):
 def scan_sources(root, respect_gitignore=True):
     """Read every eligible UTF-8 source with SHA-256 byte hashes and absolute paths.
 
-    Contract-scope roots additionally read Markdown, skip Git ignore checks and
-    never descend into ``*.claim`` directories.
+    Contract-scope roots additionally read contract Markdown and YAML, skip Git
+    ignore checks and never descend into ``*.claim`` directories.
     """
     root = canonical(root)
     contracts = is_contract_scope(root)
@@ -88,7 +90,7 @@ def scan_sources(root, respect_gitignore=True):
         if entry.name in NAMED_SOURCE_FILES or entry.name.lower() in MARKDOWN_FILENAMES:
             return True
         suffix = Path(entry.name).suffix.lower()
-        if suffix == ".md" and contracts:
+        if suffix in {".md", ".yaml"} and contracts:
             return True
         if suffix:
             return suffix in SOURCE_EXTENSIONS
@@ -133,70 +135,9 @@ def scan_sources(root, respect_gitignore=True):
     return dict(sorted(files.items()))
 
 
-def same_sources(a, b):
-    """Compare content hashes only, never timestamps or sizes."""
-    return {k: v["content_hash"] for k, v in a.items()} == {k: v["content_hash"] for k, v in b.items()}
-
-
-def plan_project(folder, store_dir=None):
-    """Preview exact hash changes without writes, migrations or network calls."""
-    root = canonical(folder)
-    database = location(root, store_dir)
-    files, old = scan_sources(root), read_index(root, database)
-    pending = pending_files(files, old)
-    return {"dryRun": True, "folder": root, "database": str(database), "indexed": len(old),
-            "eligible": len(files), "pending": pending,
-            "sync": {"updated": len(pending["added"]) + len(pending["changed"]),
-                     "deleted": len(pending["deleted"]), "unchanged": len(pending["unchanged"])}}
-
-
-def sync_index(root, database, progress=lambda text: None, reindex=False):
-    """Delete stale rows first, then atomically override current hashes; invalidate failed syncs."""
-    with closing(open_index(root, database)) as db:
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            files = scan_sources(root)
-            old = read_rows(db)
-            pending = pending_files(files, old)
-            changed = sorted(files) if reindex else sorted(pending["added"] + pending["changed"])
-            stale = list(old) if reindex else pending["deleted"] + pending["changed"]
-            db.executemany("DELETE FROM files WHERE path=?", ((path,) for path in stale))
-            progress(f"Sync: {len(files)} files; {len(changed)} indexed; {len(pending['deleted'])} deleted")
-            db.executemany("INSERT INTO files(path,content_hash) VALUES (?,?)",
-                           ((path, files[path]["content_hash"]) for path in changed))
-            if not same_sources(files, read_rows(db)):
-                raise RuntimeError("Index hash mismatch; index invalidated, rerun query")
-            db.execute("COMMIT")
-        except BaseException:
-            if db.in_transaction:
-                db.execute("ROLLBACK")
-            raise
-    return files, {"updated": len(changed), "deleted": len(pending["deleted"]),
-                   "unchanged": 0 if reindex else len(pending["unchanged"])}
-
-
-def query_project(folder, question=None, dry_run=False, index_only=False, store_dir=None,
-                  progress=lambda text: None, reindex=False):
-    """Synchronize hashes and return locally ranked source evidence with no inference."""
-    if any(not isinstance(flag, bool) for flag in (dry_run, index_only, reindex)):
-        raise ValueError("dry_run, index_only and reindex must be booleans")
-    if dry_run:
-        if reindex:
-            raise ValueError("dry_run cannot be combined with reindex")
-        return plan_project(folder, store_dir)
-    if not index_only and (not isinstance(question, str) or not question.strip()):
-        raise ValueError("A non-empty question is required")
-    root = canonical(folder)
-    database = location(root, store_dir)
-    files, sync = sync_index(root, database, progress, reindex)
-    result = {"dryRun": False, "folder": root, "database": str(database), "indexed": len(files), "sync": sync}
-    if index_only:
-        result["indexOnly"] = True
-    else:
-        ranked = rank_sources(files, question)
-        result.update({"answer": f"Found {len(ranked)} lexical matches ranked by BM25 + TF-IDF (RRF)." if ranked
-                       else "No lexical matches found; try exact symbols or different search terms.",
-                       "files": ranked,
-                       "limitations": ["Heuristic structural maps from lexical BM25 + TF-IDF over a hash-only index; "
-                                       "not semantic inference, so read full sources before editing."]})
-    return result
+def enumerate_files(folder):
+    """List eligible files with physical line counts; no model or network calls."""
+    files = scan_sources(folder)
+    return {"eligible": len(files),
+            "files": [{"path": entry["path"], "lines": len(entry["content"].split("\n"))}
+                      for entry in files.values()]}

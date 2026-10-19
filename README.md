@@ -1,236 +1,86 @@
-# Hash-only Query Engine for Pi
+# pi-evidence-engine
 
-Local source discovery using **BM25 + sublinear TF-IDF cosine**, combined with
-reciprocal rank fusion (RRF). Python 3.10+ standard library implements scanning,
-sync, retrieval, CLI and reinstall; a thin TypeScript adapter registers the tool
-through Pi's supported API. Ranking stays lexical and deterministic. The Pi
-adapter additionally summarizes retrieved source chapters with the configured
-LocalAI backend; it requires no API key, embeddings or external vector database.
-Full source is read locally; only file hashes persist in the query index.
+Fanout evidence compiler for the Pi coding agent: one question becomes a
+source-verified evidence packet, produced by a local model running on SGLang.
 
-## Run and reinstall
+## Why
 
-Use absolute source and store paths; relative paths are rejected. Folder aliases
-resolve to a canonical absolute identity. No pip dependencies are required.
+A strong parent model reasons; it should not burn its context reading whole
+repositories to find the six decisive lines. This engine fans one question out
+across deterministically selected 125-line code windows, lets a small local
+model cite what matters, and validates every citation against the files on
+disk. The parent receives compact, line-cited evidence — never repository-wide
+summaries, never unverified prose.
 
-```sh
-python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project --dry-run --json
-python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project --question 'Find authentication routes'
-python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project/.pi/subagents/contracts --question 'prior launch contract'
-python3 -B /home/ubuntu/src/sgai-pi/query-engine/cli.py --folder /project --index-only --reindex
-python3 -B /home/ubuntu/src/sgai-pi/query-engine/reinstall.py
-```
+## Pipeline
 
-The Python reinstall command invokes `pi install` with the absolute package path,
-then atomically normalizes this package's settings declaration to an absolute
-path, preserving unrelated settings and resource filters. Run **`/reload`** to
-load the updated extension and instructions in an existing Pi session. Local
-packages load from their original directory; no build or source copying occurs.
-Pi's adapter requires the normal Node runtime and host-supplied SDK packages.
+1. **Scan** — absolute-path source scanner reads eligible UTF-8 files with
+   SHA-256 hashes (source/build files plus selected project Markdown; no
+   data/config formats).
+2. **Select** — question terms (including joined identifier forms like
+   `formattedmarkdown`) score every 125-line chapter by rare-term IDF
+   coverage; coverage-greedy selection diversifies windows so common terms
+   cannot crowd out the chapter holding the rare identifier.
+3. **Fan out** — bounded parallel extraction requests against the local SGLang
+   server (`FANOUT_URL`, default `http://127.0.0.1:30000/v1`; model auto-
+   detected or `FANOUT_MODEL`). Each window gets the knowledge-enhanced
+   extraction prompt: the model cites 1-based line ranges and states one
+   claim per finding — it never retypes code.
+4. **Validate** — citations map to absolute lines through the window offset,
+   are clamped to the window, capped at twelve lines; quotes are rebuilt from
+   the file itself, so they are verbatim by construction. Reversed ranges,
+   empty/absence claims and over-length text are rejected and counted.
+5. **Assemble** — findings merge into spans (gap ≤ 3 lines), quotes truncate
+   with an explicit marker, unknowns deduplicate, and the packet reports
+   exactly which windows were searched plus usage and failure statistics.
 
-The registered `query` tool accepts:
+Window results are cached in a private per-folder SQLite store keyed by
+question, model, path, content hash and range; editing a file invalidates its
+own evidence. One failed window never sinks a query; degenerate generations
+(token ceiling) retry as two half windows.
 
-```json
-{"folder":"/project","question":"Find the API routes"}
-```
+## Asking well
 
-```json
-{"folder":"/project","dryRun":true}
-```
+The engine rewards narrow, symbol-bearing questions with one intent:
 
-Normal queries return at most ten retrieval candidates with absolute `path`,
-`line`, `reason`, fused `score` and raw `bm25`/`tfidf` scores plus a compact
-whole-file `sections` map (`mapKind`: `structural` or `fallback`). Python
-ranking, result schema, `structuredContent.files` paths and order, and native
-tool `details` remain lexical and unchanged. JSON sections have
-`{line, endLine, name, purpose}` with 1-based inclusive ranges covering every
-physical line contiguously. These are navigation partitions, not semantic
-scopes; maps are still available to programmatic callers and the CLI.
+| Scenario | Style | Example |
+|---|---|---|
+| Curiosity | name the mechanism | `how does text_delta update the visible report panel` |
+| Refactor impact | name the symbol, ask for blast radius | `if the formattedMarkdown signature changed which render call paths would be affected` |
+| Failure behavior | name the event, ask for the fallback | `what happens when no formatter listener replies to the sgai format markdown event` |
 
-The Pi adapter's normal text prints each ranked absolute path once, followed by
-zero-based, half-open 100-line chapters (`0-100`, `100-200`, and so on), each
-with one prose paragraph. Full chapters aim close to 100 words as a sizing hint,
-not a count target; short final fragments may be shorter. Summaries explain
-purpose, inputs and outputs, control flow, visible dependencies, and meaningful
-side effects or error paths. They describe code behavior when invoked without
-claiming the query ran it. The adapter reads each source without following
-symlinks, hashes the bytes, and compares that SHA-256 with the existing SQLite
-row through a read-only connection before generation. Stale snapshots, symlink
-sources, missing final content, malformed or empty summaries, and responses
-without final token usage fail explicitly. The adapter dynamically imports
-`$PI_CODING_AGENT_DIR/lib/local-ai.mjs` (default `~/.pi/agent/lib/local-ai.mjs`)
-and calls it with a strict JSON schema requiring one nonempty `summary` field,
-hidden thinking disabled (`enable_thinking:false`) while low reasoning stays on
-the wire, streaming, at most four concurrent calls, and a 2048-token cap. That
-choice is measured: this serving stack installs no reasoning parser, so with
-thinking enabled constrained decoding stalled in raw-newline whitespace to the
-token cap (invalid JSON such as `{"` followed by a literal control character)
-and often returned placeholder prose, while thinking disabled returned valid,
-real chapter summaries. Both system and chapter prompts state the exact JSON object
-shape and require only finished prose in `summary`; it parses only final
-`onUsage` message content after removing tagged thinking. The LocalAI return
-string is ignored because it may fall back to reasoning. Progress labels
-per-call stream rates as provisional; only the final footer reports aggregate
-generation time and server-reported output tokens including reasoning per
-second. The Python CLI does not generate summaries.
+Avoid multi-part questions: they dilute window selection. When a packet's
+`unknowns` say the answer lives elsewhere, re-ask with narrower terms instead
+of repeating the question.
 
-Dry runs remain write-free and skip inference. Canonical `.pi/subagents/contracts`
-queries remain deterministic: the adapter returns ranked paths without model
-generation, while the structured result retains every ranked file and section.
-Read complete recommended files before editing; lexical results are not
-semantic answers. No matching query terms returns an empty match list, not
-invented recommendations.
-
-`--json` emits one document on stdout; progress goes to stderr. Runtime failures
-exit 1 (with `{"error":"..."}` in JSON mode); invalid CLI arguments exit 2.
-`--question` is required unless `--dry-run` or `--index-only` is selected.
-`--reindex` deletes all cached file rows and inserts current hashes, including
-unchanged files; it cannot be combined with `--dry-run`.
-`--auto-all` indexes AGENTS.md folders under `/home/ubuntu/src`, reporting per-folder
-errors and exiting nonzero on failure; it cannot be combined with folder,
-question or dry-run arguments.
-
-## Minimal store and freshness
-
-Each canonical folder owns an independent database:
-
-```text
-/home/ubuntu/.pi/agent/query-engine/<sha256(canonical absolute folder)>.db
-```
-
-| Variable | Meaning |
-| --- | --- |
-| `PI_QUERY_STORE_DIR` | Absolute store-directory override |
-| `PI_CODING_AGENT_DIR` | Absolute agent-directory override; default `~/.pi/agent` |
-
-The schema contains only:
-
-```sql
-CREATE TABLE project (id INTEGER PRIMARY KEY CHECK(id=1), folder TEXT NOT NULL);
-CREATE TABLE files (path TEXT PRIMARY KEY NOT NULL, content_hash TEXT NOT NULL);
-```
-
-`project` prevents accidental cross-folder reuse. `files` contains canonical
-absolute paths and SHA-256 byte hashes, never source text, summaries, timestamps,
-sizes, vectors or model state. Legacy summary schemas are rebuilt on writable
-sync; `map_cache` is removed. Dry-run previews legacy rows as requiring reindex,
-without migrating or modifying the old database.
-
-1. Scan eligible sources and hash their complete bytes, regardless of mtime/size.
-2. Delete rows for missing or hash-mismatched files **before** inserting replacements.
-3. Insert added/changed hashes (all hashes with `--reindex`) in one transaction.
-4. Re-read indexed rows, verify they match the scanned path/hash map, then COMMIT.
-5. Rank the already-scanned in-memory sources; no post-query disk rescan occurs.
-
-Invalidation remains SHA-256-based, not diff-based; clarify whether any request
-for “different invalidation” means diff-based invalidation before changing it.
-
-Sync failures, including scan errors and detected source races, roll back the
-transaction and preserve previously valid cached rows, then fail explicitly;
-stale rows never serve as fallback evidence. SQLite uses rollback
-journals, a five-second busy timeout and serialized write transactions. The store
-is private (0700 directory, 0600 database). Folder identity mismatch, linked
-store ancestors, linked databases and unsafe sidecars are refused. This is not a
-sandbox against another process with the same OS account swapping paths mid-call.
-
-Dry runs use the same scanner and hashes, return absolute pending paths and sync
-counts, and never create a store, migrate schema or write journals. Existing
-indexes open read-only; WAL-mode indexes are refused to prevent sidecar writes.
-
-## Retrieval and eligibility
-
-Ranking uses corpus document frequencies and average document length, BM25
-`k1=1.2`, `b=0.75`, sublinear TF-IDF cosine, path term boost `3.0`, and RRF `k=60`.
-Only positive matches participate; ties resolve deterministically by absolute
-path. Identifier tokens include full names and snake/camel components. Common
-question stopwords are removed. Relative path terms are computed internally only
-for path boosting; source/store paths in inputs, outputs and SQLite are absolute.
-No source tail is discarded before scoring.
-
-Eligible files are the curated source and build sets in `query_engine/engine.py`:
-C/C++/systems and compiled languages; interpreted, functional and concurrent
-languages; shells, batch and PowerShell; frontend sources and stylesheets; SQL
-and build files; named `Makefile`/`Dockerfile`/`Jenkinsfile`; executable `#!`
-scripts; and the curated Markdown names `README.md`, `AGENTS.md`, `CLAUDE.md`,
-`CONTRIBUTING.md` and `ARCHITECTURE.md`. Data/config formats (`.txt`, `.html`,
-`.json`, `.yaml`, `.toml`) and unlisted Markdown are not indexed, so use explicit
-file reads for them.
-
-Git ignore rules are respected before reading ignored files, except in contract
-scope below. Excluded directory names:
-
-```text
-node_modules .venv venv .git __pycache__ .pytest_cache .mypy_cache
-.ruff_cache .cache .svelte-kit .next dist build coverage hf-cache .tmp
-```
-
-File/directory symlinks are skipped; the selected folder boundary is never
-crossed. Invalid UTF-8 or NUL-containing eligible files fail explicitly.
-
-### Contract scope
-
-A query whose canonical root is exactly `.pi/subagents/contracts` is bounded for
-prior-contract discovery: every Markdown file there is eligible and Git ignore
-checks are skipped, so contract fixtures stay retrievable in projects whose
-`.gitignore` hides that directory. Directories matching `*.claim/` are never
-scanned, keeping active-claim `owner.md` sidecars out of the index. Contract
-queries return up to ten retrieval candidates, deterministically ranked by
-fused score with absolute-path tie-breaking. That bound covers retrieval
-candidates only: launch filtering selects at most five completed contract
-outputs. Read the complete contract files before launching derived work or
-editing. `question` is forwarded to the Python engine unchanged (trimmed only
-for the non-empty check, so whitespace, Unicode and line endings survive), and
-the original query belongs in the child task while completed contract outputs
-enter system context. Outside this scope the original query requirements are
-untouched: ordinary source queries keep their eligibility, Git ignore rules
-and ten-candidate bound.
-
-## Library and checks
-
-```python
-from query_engine import plan_project, query_project
-
-plan = plan_project('/project')
-result = query_project('/project', 'Find routes')
-index = query_project('/project', index_only=True, reindex=True)
-```
-
-- `query_engine/engine.py`: absolute-path scanning, hash synchronization and freshness.
-- `query_engine/store.py`: minimal SQLite schema, identity and read-only planning.
-- `query_engine/retrieval.py`: deterministic BM25, TF-IDF, RRF and structural map assembly.
-- `query_engine/structure.py`: whole-file section discovery and adaptive purpose sizing.
-- `query_engine/indexer.py`: bounded AGENTS.md discovery and batch hash indexing.
-- `query_engine/__main__.py` / `cli.py`: CLI and presentation.
-- `extensions/sgai-query.ts`: Pi schemas, Python subprocess adapter, verified source snapshots and LocalAI chapter summaries.
-- `reinstall.py`: supported package installation and absolute declaration.
-
-From `/home/ubuntu/src/sgai-pi/query-engine`:
+## CLI
 
 ```sh
-npm test             # Three real CLI scenarios and one real Pi extension scenario
+python3 -B cli.py --folder /abs/repo --list                 # enumerate eligible files, no model calls
+python3 -B cli.py --folder /abs/repo --question "..."       # YAML evidence packet
+python3 -B cli.py --folder /abs/repo --question "..." --json --windows 16 --concurrency 16
 ```
 
-Functional tests cover retrieval/read-only preview, hash-sync/reindex,
-migration/failure recovery, and the real Pi adapter. The extension test uses a
-loopback streaming server to verify strict structured replies, low-reasoning
-request options, four-call concurrency, once-per-file chapter rendering,
-coverage and order, usage, reasoning-only/malformed/empty reply refusal,
-stale/symlink refusals, and write-free dry runs. It uses disposable folders and
-a read-only SQLite index; no external vector database or credentials are needed.
+JSON output embeds a pre-rendered `yaml` field for tool rendering.
+`PI_QUERY_STORE_DIR` overrides the cache location.
 
-To run a bounded live generation against GigaTrader with the configured LocalAI
-backend, use:
+## Pi extension
+
+`extensions/sgai-evidence.ts` registers the `evidence` tool: parameters
+`folder`, `question`, optional `listFiles`, `windows` (2–24, default 12) and
+`concurrency` (2–32, default 12). Results render as fenced YAML; `usage`
+reports local tokens at zero cost. Install the package:
 
 ```sh
-PI_QUERY_CHAPTER_LIVE=1 \
-PI_QUERY_CHAPTER_FOLDER=/home/ubuntu/src/GigaTrader-v2 \
-PI_QUERY_CHAPTER_QUESTION='GigaTrader architecture ranking workers predictors analytics frontend backend' \
-node tests/extension.test.mjs
+python3 reinstall.py   # pi install + absolute-path registration
 ```
 
-The opt-in runner saves the generated text and a JSON throughput report under
-`/tmp/query-chapter-live-*.txt` and `*.json`, and prints both paths. The report
-contains selected ranked paths, chapter count, generation and query wall times,
-aggregate final usage and server-token throughput, plus progress estimates
-labelled provisional. Use `/reload` after changing the extension in an existing
-Pi session.
+## Guarantees and limits
+
+- Every quote in a packet is copied from disk at cited lines; the model never
+  supplies quote text.
+- Claims are model readings, not runtime proof; read the cited spans before
+  editing.
+- `searchedWindows` makes coverage auditable; `stats` counts rejections.
+- Extraction needs the local SGLang server; enumeration and validation are
+  offline-safe. Tests: `python3 -B tests/fanout_unit.py`.
