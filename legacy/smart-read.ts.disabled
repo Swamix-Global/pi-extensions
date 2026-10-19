@@ -1,0 +1,519 @@
+/**
+ * Smart Read Tool Extension for Pi.
+ *
+ * Overrides the default file reading tool ("read") and adds "read_file".
+ * Accepts source files up to many lines of code and uses the local Granite model
+ * via structured outputs (responses API) to return the 3 most relevant line ranges
+ * and 3 insightful follow-up exploration hints.
+ *
+ * Schema:
+ * Result.ranges = ["start-end", ...] (exactly 3 ranges)
+ * Result.hints = ["...", ...] (exactly 3 hints)
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { performance } from "node:perf_hooks";
+import { Container, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { LocalAI } from "../lib/local-ai.mjs";
+import { extensionSettingsFilePath, readExtensionSettings, writeExtensionSettings } from "../lib/extension-settings.mjs";
+
+export const DEFAULT_SMART_READ_ENABLED = true;
+
+/** The shared settings file all extensions bind to: pi's own settings.json. */
+export const settingsPath = extensionSettingsFilePath;
+
+export interface SmartReadSettings {
+	enabled: boolean;
+}
+
+export function readSmartReadSettings(): SmartReadSettings {
+	const enabled = readExtensionSettings("smartRead").enabled;
+	return { enabled: typeof enabled === "boolean" ? enabled : DEFAULT_SMART_READ_ENABLED };
+}
+
+export function writeSmartReadSettings(settings: Partial<SmartReadSettings>): boolean {
+	try {
+		writeExtensionSettings("smartRead", { enabled: settings.enabled ?? readSmartReadSettings().enabled });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export const SMART_READ_SCHEMA = {
+	type: "json_schema",
+	json_schema: {
+		name: "smart_read_output",
+		strict: true,
+		schema: {
+			type: "object",
+			properties: {
+				ranges: {
+					type: "array",
+					items: {
+						type: "string",
+						pattern: "^[0-9]+-[0-9]+$",
+					},
+					minItems: 3,
+					maxItems: 3,
+					description: "Exactly 3 line ranges in start-end format e.g. 10-25",
+				},
+				hints: {
+					type: "array",
+					items: {
+						type: "string",
+					},
+					minItems: 3,
+					maxItems: 3,
+					description: "Exactly 3 follow-up exploration hints or questions caller can ask next",
+				},
+			},
+			required: ["ranges", "hints"],
+			additionalProperties: false,
+		},
+	},
+};
+
+export const SMART_READ_SYSTEM = `You are a precision code analysis engine.
+Your task is to analyze the provided source file and the caller question/focus, and return:
+1. ranges: exactly 3 line ranges in start-end format (e.g. "12-45", "104-180", "220-265") corresponding to the most relevant, high-impact sections that answer the caller request or provide the best structural view of the file.
+2. hints: exactly 3 insightful follow-up hints or questions the caller can ask next to explore this file further (e.g. "you can ask about order placement", "try asking about rendering", "explore error handling in loop boundary").
+Ensure line numbers strictly match the provided code line numbers.`;
+
+/** Prepare lines from source file up to many lines of code for the local Granite model. */
+export function prepareSourceLines(lines: string[], query?: string): string {
+	const total = lines.length;
+	// Files up to 2000 lines fit comfortably in the 32k token context
+	if (total <= 2000) {
+		return lines.map((line, idx) => `${idx + 1}: ${line}`).join("\n");
+	}
+
+	const selected = new Set<number>();
+	// Include top-level structural definitions across the entire file
+	const structuralRe =
+		/^(\s{0,4}|\t{0,1})(function|class|interface|type|const|let|var|export|import|def|async|pub|fn|for|while|switch|if|try|catch)\b/i;
+
+	// Extract keywords from query
+	const words = (query || "").toLowerCase().match(/\b[a-z0-9_]{3,}\b/g) || [];
+	const keywordRe = words.length ? new RegExp(`\\b(${words.join("|")})\\b`, "i") : null;
+
+	const keywordMatches: number[] = [];
+	const structuralMatches: number[] = [];
+
+	for (let i = 0; i < total; i++) {
+		const line = lines[i];
+		const lineNum = i + 1;
+		if (keywordRe && keywordRe.test(line)) {
+			keywordMatches.push(lineNum);
+		} else if (structuralRe.test(line)) {
+			structuralMatches.push(lineNum);
+		}
+	}
+
+	// Always add keyword match windows first
+	for (const lineNum of keywordMatches) {
+		for (let k = Math.max(1, lineNum - 4); k <= Math.min(total, lineNum + 5); k++) {
+			selected.add(k);
+		}
+	}
+
+	// Always include head and tail anchors
+	for (let k = 1; k <= Math.min(25, total); k++) selected.add(k);
+	for (let k = Math.max(1, total - 15); k <= total; k++) selected.add(k);
+
+	// Add structural matches in coherent contiguous chunks up to budget
+	const chunkSize = 15;
+	const blockCount = Math.ceil(structuralMatches.length / chunkSize);
+	const targetBlocks = Math.min(blockCount, Math.floor(1200 / chunkSize));
+	const blockStep = Math.max(1, Math.floor(blockCount / Math.max(1, targetBlocks)));
+
+	for (let b = 0; b < blockCount; b += blockStep) {
+		const startIdx = b * chunkSize;
+		const endIdx = Math.min(structuralMatches.length, startIdx + chunkSize);
+		for (let i = startIdx; i < endIdx; i++) {
+			selected.add(structuralMatches[i]);
+			if (selected.size >= 1800) break;
+		}
+		if (selected.size >= 1800) break;
+	}
+
+	const sorted = Array.from(selected).sort((a, b) => a - b);
+	const out: string[] = [];
+	let last = 0;
+	for (const n of sorted) {
+		if (last > 0 && n > last + 1) {
+			if (n - last > 3) {
+				out.push(`... [lines ${last + 1}–${n - 1} omitted] ...`);
+			} else {
+				for (let g = last + 1; g < n; g++) {
+					out.push(`${g}: ${lines[g - 1]}`);
+				}
+			}
+		}
+		out.push(`${n}: ${lines[n - 1]}`);
+		last = n;
+	}
+	return out.join("\n");
+}
+
+export interface ParsedSmartRead {
+	ranges: string[];
+	hints: string[];
+}
+
+export function normalizeRangesAndHints(
+	rawOutput: string | null,
+	totalLines: number,
+	query?: string,
+): ParsedSmartRead {
+	let parsed: any = null;
+	if (rawOutput) {
+		try {
+			parsed = JSON.parse(rawOutput);
+		} catch {
+			const m = rawOutput.match(/\{[\s\S]*\}/);
+			if (m) {
+				try {
+					parsed = JSON.parse(m[0]);
+				} catch {}
+			}
+		}
+	}
+
+	const ranges: string[] = [];
+	if (Array.isArray(parsed?.ranges)) {
+		for (const r of parsed.ranges) {
+			const str = String(r || "").trim();
+			const match = str.match(/^(\d+)[-–—:]+(\d+)$/);
+			if (match) {
+				let s = parseInt(match[1], 10);
+				let e = parseInt(match[2], 10);
+				if (s > e) [s, e] = [e, s];
+				s = Math.max(1, Math.min(totalLines, s));
+				e = Math.max(1, Math.min(totalLines, e));
+				ranges.push(`${s}-${e}`);
+			} else {
+				const singleMatch = str.match(/^(\d+)$/);
+				if (singleMatch) {
+					const s = Math.max(1, Math.min(totalLines, parseInt(singleMatch[1], 10)));
+					const e = Math.min(totalLines, s + 10);
+					ranges.push(`${s}-${e}`);
+				}
+			}
+			if (ranges.length === 3) break;
+		}
+	}
+
+	// Synthesize fallback ranges if fewer than 3
+	while (ranges.length < 3) {
+		const idx = ranges.length;
+		if (idx === 0) {
+			ranges.push(`1-${Math.min(30, totalLines)}`);
+		} else if (idx === 1) {
+			const mid = Math.max(1, Math.floor(totalLines / 2));
+			ranges.push(`${Math.max(1, mid - 15)}-${Math.min(totalLines, mid + 15)}`);
+		} else {
+			ranges.push(`${Math.max(1, totalLines - 30)}-${totalLines}`);
+		}
+	}
+
+	const hints: string[] = [];
+	if (Array.isArray(parsed?.hints)) {
+		for (const h of parsed.hints) {
+			const str = String(h || "").trim();
+			if (str && !hints.includes(str)) {
+				hints.push(str);
+			}
+			if (hints.length === 3) break;
+		}
+	}
+
+	// Synthesize fallback hints if fewer than 3
+	const defaultHints = [
+		"you can ask about settings or variable mutations",
+		"try asking about order placement and execution flow",
+		"explore rendering behavior and boundary edge cases",
+	];
+	for (const dh of defaultHints) {
+		if (hints.length >= 3) break;
+		if (!hints.includes(dh)) hints.push(dh);
+	}
+
+	return {
+		ranges: ranges.slice(0, 3),
+		hints: hints.slice(0, 3),
+	};
+}
+
+export function formatRangeSnippet(start: number, end: number, lines: string[]): string {
+	const slice = lines.slice(start - 1, end);
+	if (slice.length > 100) {
+		const head = slice.slice(0, 50).map((l, i) => `${start + i}: ${l}`);
+		const tail = slice.slice(-50).map((l, i) => `${end - 50 + 1 + i}: ${l}`);
+		return [...head, `... [lines ${start + 50}–${end - 50} omitted] ...`, ...tail].join("\n");
+	}
+	return slice.map((l, i) => `${start + i}: ${l}`).join("\n");
+}
+
+export async function executeSmartRead(
+	_toolCallId: string,
+	params: { path: string; q?: string; query?: string; offset?: number; limit?: number },
+	signal?: AbortSignal,
+	_onUpdate?: any,
+	ctx?: ExtensionContext,
+) {
+	const started = performance.now();
+	let inputTokens: number | null = 0;
+	let outputTokens: number | null = 0;
+	let usage: any;
+	const finish = <T extends { content: any[]; details: any }>(result: T) => {
+		const elapsedMs = performance.now() - started;
+		const footer = `Read completed in ${(elapsedMs / 1000).toFixed(2)}s · Tokens: input ${inputTokens ?? "unavailable"} / output ${outputTokens ?? "unavailable"}`;
+		return {
+			...result,
+			content: [...result.content, { type: "text" as const, text: footer }],
+			details: { ...result.details, elapsedMs, inputTokens, outputTokens, footer },
+			...(usage ? { usage } : {}),
+		};
+	};
+	const rawPath = params.path;
+	if (!rawPath || typeof rawPath !== "string") {
+		throw new Error("read: path is required");
+	}
+
+	const cwd = ctx?.cwd || process.cwd();
+	const absolutePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(cwd, rawPath);
+	const relPath = path.relative(cwd, absolutePath) || path.basename(absolutePath);
+
+	if (!fs.existsSync(absolutePath)) {
+		throw new Error(`File not found: ${rawPath}`);
+	}
+
+	const stat = fs.statSync(absolutePath);
+	if (!stat.isFile()) {
+		throw new Error(`Not a regular file: ${rawPath}`);
+	}
+
+	// Image support
+	const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]);
+	const ext = path.extname(absolutePath).toLowerCase();
+	if (IMAGE_EXTS.has(ext)) {
+		const buf = fs.readFileSync(absolutePath);
+		const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : `image/${ext.slice(1)}`;
+		return finish({
+			content: [
+				{ type: "image", data: buf.toString("base64"), mimeType: mime },
+				{ type: "text", text: `Read image file [${mime}] (${buf.length} bytes)` },
+			],
+			details: { image: true, mimeType: mime, bytes: buf.length },
+		});
+	}
+
+	const content = fs.readFileSync(absolutePath, "utf8");
+	const lines = content.split(/\r?\n/);
+	const totalLines = lines.length;
+
+	const settings = readSmartReadSettings();
+	const callerQuery = (params.q || params.query || "").trim();
+
+	// If disabled or explicit offset/limit without query, return raw line range
+	if (!settings.enabled || (params.offset !== undefined && params.limit !== undefined && !callerQuery)) {
+		const startLine = params.offset !== undefined ? Math.max(1, Math.floor(params.offset)) : 1;
+		const count = params.limit !== undefined ? Math.max(0, Math.floor(params.limit)) : Math.min(2000, totalLines);
+		const endLine = Math.min(totalLines, startLine + count - 1);
+		const slice = lines.slice(startLine - 1, endLine).map((l, i) => `${startLine + i}: ${l}`).join("\n");
+		const text = `# Read: ${relPath} (lines ${startLine}–${endLine} of ${totalLines})\n\n${slice}`;
+		return finish({
+			content: [{ type: "text" as const, text }],
+			details: { path: relPath, totalLines, offset: startLine, limit: count },
+		});
+	}
+
+	// Smart Read execution with local Granite model
+	const effectiveQuery =
+		callerQuery ||
+		"Identify the 3 most important structural regions (key declarations, variables/settings, core logic, or main entry points) and 3 insightful follow-up questions/hints.";
+
+	const sourceText = prepareSourceLines(lines, effectiveQuery);
+	const prompt = [
+		`File: ${relPath} (${totalLines} lines)`,
+		`Caller Query: ${effectiveQuery}`,
+		"",
+		"Source code with line numbers:",
+		sourceText,
+	].join("\n");
+
+	let localRaw: string | null = null;
+	inputTokens = outputTokens = null;
+	try {
+		localRaw = await LocalAI(prompt, {
+			system: SMART_READ_SYSTEM,
+			responseFormat: SMART_READ_SCHEMA,
+			maxTokens: 800,
+			thinking: false,
+			reasoningEffort: "low",
+			signal,
+			source: "smart_read",
+			onUsage: (reported: any) => {
+				inputTokens = reported?.prompt_tokens ?? reported?.input_tokens ?? null;
+				outputTokens = reported?.completion_tokens ?? reported?.output_tokens ?? null;
+				if (inputTokens !== null && outputTokens !== null) {
+					usage = {
+						input: inputTokens, output: outputTokens,
+						cacheRead: reported?.prompt_tokens_details?.cached_tokens ?? 0,
+						cacheWrite: 0, totalTokens: reported?.total_tokens ?? inputTokens + outputTokens,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+				}
+			},
+		});
+	} catch {
+		// Handled gracefully by normalizer
+	}
+
+	const result = normalizeRangesAndHints(localRaw, totalLines, effectiveQuery);
+
+	// Extract and format code snippets for each of the 3 ranges
+	const rangeSnippets = result.ranges.map((r, i) => {
+		const [sStr, eStr] = r.split("-");
+		const s = parseInt(sStr, 10);
+		const e = parseInt(eStr, 10);
+		const snippet = formatRangeSnippet(s, e, lines);
+		return `### [Range ${i + 1}: lines ${s}–${e}]\n\`\`\`\n${snippet}\n\`\`\``;
+	});
+
+	const responseText = [
+		`# Smart Read: ${relPath} (${totalLines} lines)`,
+		callerQuery ? `Query: ${callerQuery}` : "",
+		"",
+		`Result.ranges=[${result.ranges.map((r) => `"${r}"`).join(", ")}]`,
+		`Result.hints=[${result.hints.map((h) => `"${h}"`).join(", ")}]`,
+		"",
+		"---",
+		"",
+		...rangeSnippets,
+		"",
+		"---",
+		"💡 Suggested Next Questions / Hints:",
+		`1. ${result.hints[0]}`,
+		`2. ${result.hints[1]}`,
+		`3. ${result.hints[2]}`,
+	]
+		.filter(Boolean)
+		.join("\n");
+
+	return finish({
+		content: [
+			{
+				type: "text" as const,
+				text: responseText,
+			},
+		],
+		details: {
+			path: relPath,
+			totalLines,
+			query: callerQuery || undefined,
+			ranges: result.ranges,
+			hints: result.hints,
+		},
+		structuredContent: {
+			ranges: result.ranges,
+			hints: result.hints,
+			path: relPath,
+			totalLines,
+		},
+	});
+}
+
+export const readParameters = Type.Object({
+	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+	q: Type.Optional(
+		Type.String({
+			description:
+				"Query or focus directive for smart analysis (e.g. 'find nested loops in this file', 'give where settings/variables are present in this file', 'get the part which affects order placement')",
+		}),
+	),
+	query: Type.Optional(
+		Type.String({
+			description: "Alias for q: question or focus directive for smart file analysis",
+		}),
+	),
+	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+});
+
+export const readOutputSchema = Type.Object({
+	ranges: Type.Optional(Type.Array(Type.String())),
+	hints: Type.Optional(Type.Array(Type.String())),
+	path: Type.Optional(Type.String()),
+	totalLines: Type.Optional(Type.Number()),
+});
+
+const toolDescription =
+	"Smart file reader. Analyzes source files of any size using the local Granite model to locate exact relevant line ranges and provide follow-up exploration hints. Supports optional 'q' or 'query' (e.g., 'find nested loops', 'where settings/variables are defined') to return targeted 3 line ranges (start-end format) and 3 hints, or offset/limit for raw line slices.";
+
+export default function (pi: ExtensionAPI) {
+	pi.registerToolRenderer((name, next) => {
+		if (name !== "read" && name !== "read_file") return next();
+		const base = next();
+		return {
+			...base,
+			renderResult(result, options, theme, context) {
+				const footer = result.details?.footer;
+				if (!footer || result.details?.image) {
+					return base?.renderResult?.(result, options, theme, context)
+						?? new Text(result.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"), 0, 0);
+				}
+				const body = { ...result, content: result.content.slice(0, -1) };
+				const text = body.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+				const lines = text.split("\n");
+				const container = new Container();
+				container.addChild(base?.renderResult?.(body, options, theme, context)
+					?? new Text(options.expanded ? text : lines.slice(0, 10).join("\n") + (lines.length > 10 ? "\n…" : ""), 0, 0));
+				container.addChild(new Text(theme.fg("muted", footer), 0, 0));
+				return container;
+			},
+		};
+	});
+	pi.registerCommand("settings:smart-read", {
+		description: "Toggle smart read tool with local Granite model: /settings:smart-read [on|off]",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "on" || arg === "off") {
+				writeSmartReadSettings({ enabled: arg === "on" });
+				ctx.ui.notify(`Smart read is now ${arg}. Run /reload to apply.`, "info");
+			} else {
+				const current = readSmartReadSettings().enabled ? "on" : "off";
+				ctx.ui.notify(
+					`Smart read is currently ${current}. Use '/settings:smart-read on|off' to toggle.`,
+					"info",
+				);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "read",
+		label: "smart_read",
+		description: toolDescription,
+		parameters: readParameters,
+		outputSchema: readOutputSchema,
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return executeSmartRead(toolCallId, params, signal, onUpdate, ctx);
+		},
+	});
+
+	pi.registerTool({
+		name: "read_file",
+		label: "smart_read_file",
+		description: toolDescription,
+		parameters: readParameters,
+		outputSchema: readOutputSchema,
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return executeSmartRead(toolCallId, params, signal, onUpdate, ctx);
+		},
+	});
+}
