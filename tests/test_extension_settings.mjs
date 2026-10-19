@@ -21,8 +21,11 @@ fs.writeFileSync(SETTINGS_PATH, JSON.stringify({
 	customTopLevel: "keep-me",
 }));
 
-const subagentx = await import(`${root}/extensions/sgai-subagentx.ts`);
-const compaction = await import(`${root}/extensions/fallback-compaction.ts`);
+const subagentxFile = path.join(root, "extensions", "sgai-subagentx.ts");
+// SubagentX ships as its own package (subagent-pack); its flat extension only exists
+// when it was installed the old way. Its pool checks are skipped otherwise.
+const subagentx = fs.existsSync(subagentxFile) ? await import(subagentxFile) : null;
+const compaction = await import(path.join(root, "extensions", "fallback-compaction.ts"));
 
 const silentCtx = { ui: { notify: () => {} } };
 const commandSpecs = {};
@@ -38,33 +41,37 @@ const assertCommandDescription = (name, key) => {
 
 try {
 	// --- subagent model pool: the settings default must match the execution default ---
-	const defaults = subagentx.readSettings();
-	const executionSource = fs.readFileSync(`${root}/extensions/sgai-subagentx.ts`, "utf8");
-	const declared = executionSource.match(/const DEFAULT_SUBAGENT_MODELS = (\[[^;]+\]);/);
-	assert.ok(declared, "execution default pool is declared");
-	assert.deepEqual(JSON.parse(declared[1]), defaults.subagentModels, "settings and execution default pools agree");
-	const previousSettingsPath = process.env.PI_EXTENSION_SETTINGS_PATH;
-	const emptySettings = path.join(tmp, "empty-settings.json");
-	fs.writeFileSync(emptySettings, JSON.stringify({ extensionSettings: { subagentx: { subagentModels: [] } } }));
-	process.env.PI_EXTENSION_SETTINGS_PATH = emptySettings;
-	assert.deepEqual(subagentx.readSettings().subagentModels, defaults.subagentModels, "an empty pool falls back to the default pool");
-	process.env.PI_EXTENSION_SETTINGS_PATH = previousSettingsPath;
+	if (subagentx) {
+		const defaults = subagentx.readSettings();
+		const executionSource = fs.readFileSync(subagentxFile, "utf8");
+		const declared = executionSource.match(/const DEFAULT_SUBAGENT_MODELS = (\[[^;]+\]);/);
+		assert.ok(declared, "execution default pool is declared");
+		assert.deepEqual(JSON.parse(declared[1]), defaults.subagentModels, "settings and execution default pools agree");
+		const previousSettingsPath = process.env.PI_EXTENSION_SETTINGS_PATH;
+		const emptySettings = path.join(tmp, "empty-settings.json");
+		fs.writeFileSync(emptySettings, JSON.stringify({ extensionSettings: { subagentx: { subagentModels: [] } } }));
+		process.env.PI_EXTENSION_SETTINGS_PATH = emptySettings;
+		assert.deepEqual(subagentx.readSettings().subagentModels, defaults.subagentModels, "an empty pool falls back to the default pool");
+		process.env.PI_EXTENSION_SETTINGS_PATH = previousSettingsPath;
 
-	// --- one atomic round-trip: a seeded custom setting survives, no temp file is left behind ---
-	subagentx.writeSettings({ localModel: "custom/local-model" });
-	subagentx.writeSettings({ compressionSuffix: "be terse", subagentModels: ["deepseek/deepseek-flash"] });
-	const written = subagentx.readSettings();
-	assert.equal(written.compressionSuffix, "be terse", "suffix persists");
-	assert.deepEqual(written.subagentModels, ["deepseek/deepseek-flash"], "pool persists");
-	assert.equal(written.localModel, "custom/local-model", "the seeded localModel survives a later merged write");
-	assert.equal(JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8")).customTopLevel, "keep-me", "unrelated top-level settings survive an extension write");
-	assert.equal(fs.readdirSync(tmp).filter((f) => f.includes(".tmp.")).length, 0, "atomic write leaves no temp file");
+		// --- one atomic round-trip: a seeded custom setting survives, no temp file is left behind ---
+		subagentx.writeSettings({ localModel: "custom/local-model" });
+		subagentx.writeSettings({ compressionSuffix: "be terse", subagentModels: ["deepseek/deepseek-flash"] });
+		const written = subagentx.readSettings();
+		assert.equal(written.compressionSuffix, "be terse", "suffix persists");
+		assert.deepEqual(written.subagentModels, ["deepseek/deepseek-flash"], "pool persists");
+		assert.equal(written.localModel, "custom/local-model", "the seeded localModel survives a later merged write");
+		assert.equal(JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8")).customTopLevel, "keep-me", "unrelated top-level settings survive an extension write");
+		assert.equal(fs.readdirSync(tmp).filter((f) => f.includes(".tmp.")).length, 0, "atomic write leaves no temp file");
 
-	// command registration survives disabled settings and tags the shared settings.json source
-	subagentx.writeSettings({ enabled: false });
-	subagentx.default({ on: () => {}, registerCommand: captureCommand });
-	subagentx.writeSettings({ enabled: true });
-	assertCommandDescription("subagentx", "subagentx");
+		// command registration survives disabled settings and tags the shared settings.json source
+		subagentx.writeSettings({ enabled: false });
+		subagentx.default({ on: () => {}, registerCommand: captureCommand });
+		subagentx.writeSettings({ enabled: true });
+		assertCommandDescription("subagentx", "subagentx");
+	} else {
+		console.log("subagentx not installed as a flat extension; skipping its pool checks");
+	}
 
 	// --- fallback compaction: only agent_settled is hooked (turn_end/agent_end abort live runs) ---
 	const hooks = {};

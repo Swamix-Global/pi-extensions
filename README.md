@@ -49,3 +49,7 @@ cd query-engine && python3 -B tests/fanout_unit.py               # evidence engi
 
 Suites drive the installed copies under `$PI_CODING_AGENT_DIR/extensions`, so run
 `bash install.sh` first.
+
+`tests/test_extension_settings.mjs` also checks SubagentX's settings pool, but only when
+`sgai-subagentx.ts` exists as a flat extension; SubagentX normally ships as its own package
+and owns those checks in `subagent-pack`.
