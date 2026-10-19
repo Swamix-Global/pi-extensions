@@ -1,0 +1,17 @@
+{
+  "name": "pi-evidence-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "python3 -B tests/fanout_unit.py",
+    "evidence": "python3 -B cli.py"
+  },
+  "pi": {
+    "extensions": ["extensions/sgai-evidence.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
