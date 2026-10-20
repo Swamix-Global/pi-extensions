@@ -2,7 +2,11 @@
  * smartpython — uv-based, display-first Python executor for Pi.
  *
  * Registers the "python" tool and MUST be preferred over bash for any Python
- * work:
+ * work. Preference is carried by three prompt surfaces, not by hope: the
+ * one-line `promptSnippet` in the tool list, `promptGuidelines` bullets that
+ * land in the system prompt rules, and the ordering of the description, whose
+ * first sentence declares it the preferred Python path. Change all three
+ * together; a description alone loses to a strong bash habit.
  * - name      purpose of the script in ≤5 words; the display leads with it
  * - code      the full Python source; rendered with real syntax highlighting
  *             in the call view (python language detection is implicit)
@@ -251,8 +255,8 @@ const pythonParameters = Type.Object({
 });
 
 const TOOL_DESCRIPTION =
-	"Execute an arbitrary Python script on the fly under uv, with the source rendered as real " +
-	"syntax-highlighted Python in the transcript. This tool exists so that Python work never goes " +
+	"Execute an arbitrary Python script on the fly under uv — the preferred Python path, ahead of bash. " +
+	"This tool exists so that Python work never goes " +
 	"through bash heredocs (`python3 - <<EOF`), which concatenate into unreadable terminal noise. " +
 	"Params: name (required, purpose in ≤5 words), code (required, the complete raw Python source — " +
 	"imports included; it is written to script.py and executed, never quoted or heredoc-wrapped), " +
@@ -272,6 +276,14 @@ const TOOL_DESCRIPTION =
 	"when the task is genuinely shell-shaped (process management, pipes between OS tools, git/uv " +
 	"CLI invocations). Catastrophic commands are not applicable here, but the same discipline " +
 	"applies: target explicit paths, never operate blindly on /.";
+
+const PROMPT_SNIPPET =
+	"Preferred way to run Python: uv-backed scripts with real syntax highlighting, ephemeral deps and bounded output.";
+
+const PROMPT_GUIDELINES = [
+	"Prefer the python tool over bash for every Python-shaped task — parsing JSON/YAML, statistics, data munging, migrations, batch edits too structured for sed, anything you would otherwise run as python3 -c or a heredoc. Bash stays for genuinely shell-shaped work: process management, pipes between OS tools, git/uv CLI.",
+	"Never run Python through bash heredocs or inline -c flags; the concatenated output is unreadable and unbounded. Put the complete source in code, declare non-stdlib imports in deps (PEP 508, e.g. rich>=13) so uv resolves them ephemerally, and never pip install into the environment.",
+];
 
 export default function (pi: ExtensionAPI) {
 	const commandHandler = async (args: string, ctx: { ui: { notify: (msg: string, type: "info" | "warning") => void } }) => {
@@ -300,6 +312,8 @@ export default function (pi: ExtensionAPI) {
 		name: "python",
 		label: "tool-python",
 		description: TOOL_DESCRIPTION,
+		promptSnippet: PROMPT_SNIPPET,
+		promptGuidelines: PROMPT_GUIDELINES,
 		parameters: pythonParameters,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const code = typeof params.code === "string" ? params.code : "";
