@@ -123,6 +123,43 @@ function yamlSplitKey(rest: string): { key: string; value: string } | undefined 
 	return undefined;
 }
 
+/**
+ * Detect an unfenced YAML document so tool results that return bare YAML (the
+ * evidence engine, query tools) still get a box and token colors. Deliberately
+ * conservative: every line must look structural, at least two `key:` lines must
+ * be present, and prose/markdown markers disqualify the whole block.
+ */
+export function looksLikeBareYaml(text: string): boolean {
+	const raw = text.trim();
+	if (!raw || raw.length < 24) return false;
+	if (/^\s*```/.test(raw)) return false;
+	const lines = raw.split("\n");
+	let keyLines = 0;
+	let structural = 0;
+	let considered = 0;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		// Interleaved notes from other extensions stay ignorable.
+		if (/^[…]/.test(trimmed) || /^\[\(\[]/.test(trimmed) || /^\.\.\. \[/.test(trimmed)) continue;
+		// Markdown structure means this is prose, not a YAML document.
+		if (/^(#{1,6}\s|[-*+]\s{2,}|>|\||<!--)/.test(trimmed)) return false;
+		if (/\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\)/.test(trimmed)) return false;
+		considered++;
+		if (/^-\s+\S/.test(trimmed) || /^[^\s#][^:]*:(\s|$)/.test(trimmed) || /^\s+\S/.test(line)) structural++;
+		if (/^[^\s#][^:]*:(\s|$)/.test(trimmed)) keyLines++;
+	}
+	if (considered < 3 || keyLines < 2) return false;
+	if (structural / considered < 0.85) return false;
+	// A sentence of running prose with colons should not be mistaken for YAML.
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed.length > 240) return false;
+		if (/\b(the|and|that|with|this|which)\b.*\b(is|are|was|were)\b/i.test(trimmed) && !/^-\s/.test(trimmed) && !/:$/.test(trimmed)) return false;
+	}
+	return true;
+}
+
 /** Color a value segment: flow collections, quoted strings, scalars, trailing comments. */
 function yamlValue(value: string): string {
 	let out = "";
@@ -238,6 +275,8 @@ function formatCodeBlock(lines: string[], lang: string, availableWidth?: number)
 export function formatMarkdown(markdown: string, ctx: { messageType?: string; availableWidth?: number } = {}): string {
 	if (!markdown) return "";
 	if (ctx?.messageType === "assistant-thinking") return markdown;
+	// Bare YAML tool output has no fence; give it one so it renders boxed and colored.
+	if (looksLikeBareYaml(markdown)) markdown = `\u0060\u0060\u0060yaml\n${markdown.trim()}\n\u0060\u0060\u0060`;
 	const { availableWidth } = ctx;
 
 	const lines = markdown.split("\n");

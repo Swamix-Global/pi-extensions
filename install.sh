@@ -21,6 +21,9 @@ for package in "${packages[@]}"; do
   install -v -m 644 "$source_dir/$package/package.json" "$target/package.json"
   rm -rf "$target/build"
   cp -a "$source_dir/$package/build" "$target/build"
+  # Purge stale bundles from earlier package names so only the manifest entry remains.
+  entry="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pi"]["extensions"][0])' "$target/package.json")"
+  find "$target/build" -maxdepth 1 -type f ! -name "$(basename -- "$entry")" -print -delete
   # Retire artifacts from the pre-package layout, which pi would load twice.
   rm -f "$agent_dir/extensions/$package.ts" "$target/index.ts" "$target/index.js"
 done
