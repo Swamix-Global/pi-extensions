@@ -1,5 +1,5 @@
 /**
- * Native Fallback Compaction Extension for Pi.
+ * util-compaction — Context compaction and output budget utility for Pi.
  *
  * Caps tool results during live runs and repairs oversized legacy request context.
  * If settled context reaches the proactive threshold (default: 100,000 tokens),
@@ -17,23 +17,27 @@ import type {
 import { extensionSettingsFilePath, readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
 import { registerContextBudget } from "./context-budget.ts";
 
-export const DEFAULT_FALLBACK_COMPACTION_THRESHOLD = 100_000;
+export const DEFAULT_UTIL_COMPACTION_THRESHOLD = 100_000;
+export const DEFAULT_FALLBACK_COMPACTION_THRESHOLD = DEFAULT_UTIL_COMPACTION_THRESHOLD;
 
 export const settingsPath = extensionSettingsFilePath;
 
-export interface FallbackCompactionSettings {
+export interface UtilCompactionSettings {
 	enabled: boolean;
 	thresholdTokens: number;
 }
+export type FallbackCompactionSettings = UtilCompactionSettings;
 
 interface SettingsState {
-	settings: FallbackCompactionSettings;
+	settings: UtilCompactionSettings;
 	enabledSource: "u" | "d";
 	thresholdSource: "u" | "d";
 }
 
 function readSettingsState(): SettingsState {
-	const raw: Record<string, unknown> = readExtensionSettings("fallbackCompaction");
+	const rawUtil: Record<string, unknown> = readExtensionSettings("utilCompaction");
+	const rawFallback: Record<string, unknown> = readExtensionSettings("fallbackCompaction");
+	const raw = Object.keys(rawUtil).length > 0 ? rawUtil : rawFallback;
 
 	const enabledIsUser = typeof raw?.enabled === "boolean";
 	const thresholdIsUser =
@@ -45,23 +49,25 @@ function readSettingsState(): SettingsState {
 			enabled: enabledIsUser ? (raw?.enabled as boolean) : true,
 			thresholdTokens: thresholdIsUser
 				? (raw?.thresholdTokens as number)
-				: DEFAULT_FALLBACK_COMPACTION_THRESHOLD,
+				: DEFAULT_UTIL_COMPACTION_THRESHOLD,
 		},
 		enabledSource: enabledIsUser ? "u" : "d",
 		thresholdSource: thresholdIsUser ? "u" : "d",
 	};
 }
 
-export function readSettings(): FallbackCompactionSettings {
+export function readSettings(): UtilCompactionSettings {
 	return readSettingsState().settings;
 }
 
-export function writeSettings(settings: Partial<FallbackCompactionSettings>): void {
+export function writeSettings(settings: Partial<UtilCompactionSettings>): void {
 	try {
 		const current = readSettings();
-		writeExtensionSettings("fallbackCompaction", { ...current, ...settings });
+		const merged = { ...current, ...settings };
+		writeExtensionSettings("utilCompaction", merged);
+		writeExtensionSettings("fallbackCompaction", merged);
 	} catch (error) {
-		console.error(`[SETTINGS_FALLBACK_COMPACTION_WRITE_FAILED]: ${error}`);
+		console.error(`[SETTINGS_UTIL_COMPACTION_WRITE_FAILED]: ${error}`);
 	}
 }
 
@@ -94,7 +100,7 @@ export function createCompactionChecker(): CompactionChecker {
 			lastAttemptTokens = usage.tokens;
 			const thresholdStr = (cfg.thresholdTokens / 1000).toFixed(0);
 			ctx.ui?.notify?.(
-				`Context reached ${usage.tokens.toLocaleString()} tokens (>= ${thresholdStr}k). Triggering native fallback compaction...`,
+				`Context reached ${usage.tokens.toLocaleString()} tokens (>= ${thresholdStr}k). Triggering native compaction...`,
 				"info",
 			);
 			try {
@@ -106,7 +112,7 @@ export function createCompactionChecker(): CompactionChecker {
 						lockSince = 0;
 						lastAttemptTokens = result.estimatedTokensAfter ?? usage.tokens;
 						ctx.ui?.notify?.(
-							`Native fallback compaction complete: ${result.tokensBefore?.toLocaleString() ?? "context"} tokens compacted.`,
+							`Native compaction complete: ${result.tokensBefore?.toLocaleString() ?? "context"} tokens compacted.`,
 							"info",
 						);
 					},
@@ -115,7 +121,7 @@ export function createCompactionChecker(): CompactionChecker {
 						lockSince = 0;
 						const msg = err?.message || String(err);
 						if (!msg.includes("Already compacted") && !msg.includes("too small")) {
-							ctx.ui?.notify?.(`Native fallback compaction error: ${msg}`, "warning");
+							ctx.ui?.notify?.(`Native compaction error: ${msg}`, "warning");
 						}
 					},
 				});
@@ -125,7 +131,7 @@ export function createCompactionChecker(): CompactionChecker {
 				lockSince = 0;
 				const msg = error instanceof Error ? error.message : String(error);
 				if (!msg.includes("Already compacted") && !msg.includes("too small")) {
-					ctx.ui?.notify?.(`Native fallback compaction trigger failed: ${msg}`, "warning");
+					ctx.ui?.notify?.(`Native compaction trigger failed: ${msg}`, "warning");
 				}
 				return false;
 			}
@@ -148,45 +154,52 @@ export default function (pi: ExtensionAPI) {
 	registerContextBudget(pi, settingsPath);
 	const checker = createCompactionChecker();
 
+	const commandHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const state = readSettingsState();
+		const current = state.settings;
+		const arg = String(args ?? "").trim().toLowerCase();
+
+		if (!arg) {
+			ctx.ui.notify(
+				`Util compaction: [${state.enabledSource}] ${current.enabled ? "on" : "off"}, threshold: [${state.thresholdSource}] ${current.thresholdTokens.toLocaleString()} tokens`,
+				"info",
+			);
+			return;
+		}
+
+		if (arg === "on" || arg === "off") {
+			const enabled = arg === "on";
+			writeSettings({ enabled });
+			ctx.ui.notify(`Util compaction: [u] ${enabled ? "on" : "off"} — ${settingsPath()}`, "info");
+			return;
+		}
+
+		const num = Number(arg.replace(/k$/i, "000"));
+		if (Number.isSafeInteger(num) && num >= 1000) {
+			writeSettings({ thresholdTokens: num, enabled: true });
+			ctx.ui.notify(
+				`Util compaction: [u] threshold ${num.toLocaleString()} tokens (on) — ${settingsPath()}`,
+				"info",
+			);
+			return;
+		}
+
+		ctx.ui.notify(
+			`Invalid argument "${args}". Usage: /settings:util-compaction [on|off|<tokens>] (e.g. 100k or 100000)`,
+			"warning",
+		);
+	};
+
 	try {
+		pi.registerCommand?.("settings:util-compaction", {
+			description:
+				"[u] (settings.json:extensionSettings.utilCompaction) Util compaction settings — /settings:util-compaction [on|off|<tokens>]",
+			handler: commandHandler,
+		});
 		pi.registerCommand?.("settings:fallback-compaction", {
 			description:
 				"[u] (settings.json:extensionSettings.fallbackCompaction) Fallback native compaction settings — /settings:fallback-compaction [on|off|<tokens>]",
-			handler: async (args: string, ctx: ExtensionCommandContext) => {
-				const state = readSettingsState();
-				const current = state.settings;
-				const arg = String(args ?? "").trim().toLowerCase();
-
-				if (!arg) {
-					ctx.ui.notify(
-						`Fallback compaction: [${state.enabledSource}] ${current.enabled ? "on" : "off"}, threshold: [${state.thresholdSource}] ${current.thresholdTokens.toLocaleString()} tokens`,
-						"info",
-					);
-					return;
-				}
-
-				if (arg === "on" || arg === "off") {
-					const enabled = arg === "on";
-					writeSettings({ enabled });
-					ctx.ui.notify(`Fallback compaction: [u] ${enabled ? "on" : "off"} — ${settingsPath()}`, "info");
-					return;
-				}
-
-				const num = Number(arg.replace(/k$/i, "000"));
-				if (Number.isSafeInteger(num) && num >= 1000) {
-					writeSettings({ thresholdTokens: num, enabled: true });
-					ctx.ui.notify(
-						`Fallback compaction: [u] threshold ${num.toLocaleString()} tokens (on) — ${settingsPath()}`,
-						"info",
-					);
-					return;
-				}
-
-				ctx.ui.notify(
-					`Invalid argument "${args}". Usage: /settings:fallback-compaction [on|off|<tokens>] (e.g. 100k or 100000)`,
-					"warning",
-				);
-			},
+			handler: commandHandler,
 		});
 	} catch {}
 

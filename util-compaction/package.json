@@ -1,0 +1,21 @@
+{
+  "name": "@sgai/pi-util-compaction",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Context compaction and output-budget utility for Pi: triggers native ctx.compact() when context crosses the threshold and enforces hard output budgets.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/util-compaction.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh util-compaction"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

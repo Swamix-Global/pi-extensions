@@ -12,7 +12,7 @@ NODE_MODULES_SRC="${PI_AGENT_NODE_MODULES:-$HOME/.pi/agent/node_modules}"
 
 mkdir -p build
 "$BUN" build src/sgai-subagentx.ts \
-  --outfile build/sgai-subagentx.js \
+  --outfile build/tool-subagentx.js \
   --target=node \
   --format=esm \
   --minify \
@@ -20,4 +20,5 @@ mkdir -p build
   --external "@earendil-works/pi-tui" \
   --external "typebox"
 
-wc -c build/sgai-subagentx.js
+cp -f build/tool-subagentx.js build/sgai-subagentx.js
+wc -c build/tool-subagentx.js

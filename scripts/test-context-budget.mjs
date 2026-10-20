@@ -19,11 +19,11 @@ const jiti = createJiti(import.meta.url, { alias: {
 } });
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "context-budget-"));
 process.env.PI_EXTENSION_SETTINGS_PATH = path.join(temp, "settings.json");
-fs.writeFileSync(process.env.PI_EXTENSION_SETTINGS_PATH, JSON.stringify({ extensionSettings: { fallbackCompaction: { enabled: false } } }));
+fs.writeFileSync(process.env.PI_EXTENSION_SETTINGS_PATH, JSON.stringify({ extensionSettings: { utilCompaction: { enabled: false } } }));
 const { SessionManager, buildSessionContext, estimateTokens } = await import(`${sdkRoot}/dist/index.js`);
-const bash = await jiti.import(`${root}/smartbash/src/index.ts`);
-const fallback = await jiti.import(`${root}/fallback-compaction/src/index.ts`);
-const budget = await jiti.import(`${root}/smartbash/src/output-budget.ts`);
+const bash = await jiti.import(`${root}/tool-bash/src/index.ts`);
+const fallback = await jiti.import(`${root}/util-compaction/src/index.ts`);
+const budget = await jiti.import(`${root}/tool-bash/src/output-budget.ts`);
 const hooks = {};
 fallback.default({ on: (name, fn) => { hooks[name] = fn; }, registerCommand() {} });
 let aborts = 0;
@@ -42,8 +42,8 @@ try {
   check("proactive compaction defaults to 100k, not 50k, and triggers at exactly 100k", () => {
     const original = fs.readFileSync(process.env.PI_EXTENSION_SETTINGS_PATH);
     try {
-      fs.writeFileSync(process.env.PI_EXTENSION_SETTINGS_PATH, JSON.stringify({ extensionSettings: { fallbackCompaction: { enabled: true } } }));
-      assert.equal(fallback.DEFAULT_FALLBACK_COMPACTION_THRESHOLD, 100000);
+      fs.writeFileSync(process.env.PI_EXTENSION_SETTINGS_PATH, JSON.stringify({ extensionSettings: { utilCompaction: { enabled: true } } }));
+      assert.equal(fallback.DEFAULT_UTIL_COMPACTION_THRESHOLD, 100000);
       assert.equal(fallback.readSettings().thresholdTokens, 100000);
       const checker = fallback.createCompactionChecker();
       let tokens = 50000;
@@ -61,7 +61,7 @@ try {
   });
 
   check("inlined package budget copies cannot drift silently", () => {
-    assert.equal(fs.readFileSync(`${root}/smartbash/src/output-budget.ts`, "utf8"), fs.readFileSync(`${root}/fallback-compaction/src/output-budget.ts`, "utf8"));
+    assert.equal(fs.readFileSync(`${root}/tool-bash/src/output-budget.ts`, "utf8"), fs.readFileSync(`${root}/util-compaction/src/output-budget.ts`, "utf8"));
   });
   check("UTF-8 cap, both ends, marker included, exact boundaries", () => {
     for (const limit of [0, 1, 63, 1024, 65536]) {
@@ -75,7 +75,7 @@ try {
     assert.ok(budget.boundText(`HEAD${"x".repeat(1000)}TAIL`, 100).startsWith("HEAD"));
     assert.ok(budget.boundText(`HEAD${"x".repeat(1000)}TAIL`, 100).endsWith("TAIL"));
   });
-  check("smartbash caps giant lines, short files and ordinary 5000-line output", () => {
+  check("tool-bash caps giant lines, short files and ordinary 5000-line output", () => {
     for (const [name, value, count] of [
       ["one", `HEAD${"x".repeat(4000000)}TAIL`, 1],
       ["fifty", Array(50).fill("x".repeat(80000)).join("\n"), 50],

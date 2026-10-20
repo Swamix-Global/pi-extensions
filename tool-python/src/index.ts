@@ -30,6 +30,7 @@ import * as path from "node:path";
 import { highlightCode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { BoxedText } from "./box.ts";
 import { readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
 import { boundText, TOOL_OUTPUT_BYTES } from "./output-budget.ts";
 
@@ -44,7 +45,7 @@ const VERBATIM_BYTES = TOOL_OUTPUT_BYTES - 4096;
 const ELIDE_SIDE_LINES = 100;
 const CALL_CODE_LINES = 40;
 
-export interface SmartPythonDetails {
+export interface ToolPythonDetails {
 	status: "running" | "done" | "timeout" | "aborted" | "uv-missing";
 	name: string;
 	directory: string;
@@ -64,12 +65,12 @@ export interface SmartPythonDetails {
 	elided?: boolean;
 }
 
-export function readSmartPythonSettings(): { enabled: boolean } {
+export function readToolPythonSettings(): { enabled: boolean } {
 	const enabled = readExtensionSettings("smartPython").enabled;
 	return { enabled: typeof enabled === "boolean" ? enabled : true };
 }
 
-export function writeSmartPythonSettings(enabled: boolean): boolean {
+export function writeToolPythonSettings(enabled: boolean): boolean {
 	try {
 		writeExtensionSettings("smartPython", { enabled });
 		return true;
@@ -273,25 +274,31 @@ const TOOL_DESCRIPTION =
 	"applies: target explicit paths, never operate blindly on /.";
 
 export default function (pi: ExtensionAPI) {
+	const commandHandler = async (args: string, ctx: { ui: { notify: (msg: string, type: "info" | "warning") => void } }) => {
+		const arg = args.trim().toLowerCase();
+		if (arg === "on" || arg === "off") {
+			writeToolPythonSettings(arg === "on");
+			ctx.ui.notify(`tool-python is now ${arg}. Run /reload to apply.`, "info");
+		} else {
+			const current = readToolPythonSettings().enabled ? "on" : "off";
+			ctx.ui.notify(`tool-python is currently ${current}. Use '/settings:tool-python on|off' to toggle.`, "info");
+		}
+	};
+
+	pi.registerCommand("settings:tool-python", {
+		description: "Toggle the tool-python tool: /settings:tool-python [on|off]",
+		handler: commandHandler,
+	});
 	pi.registerCommand("settings:smartpython", {
-		description: "Toggle the smartpython tool: /settings:smartpython [on|off]",
-		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-			if (arg === "on" || arg === "off") {
-				writeSmartPythonSettings(arg === "on");
-				ctx.ui.notify(`smartpython is now ${arg}. Run /reload to apply.`, "info");
-			} else {
-				const current = readSmartPythonSettings().enabled ? "on" : "off";
-				ctx.ui.notify(`smartpython is currently ${current}. Use '/settings:smartpython on|off' to toggle.`, "info");
-			}
-		},
+		description: "Toggle the tool-python tool (alias): /settings:smartpython [on|off]",
+		handler: commandHandler,
 	});
 
-	if (!readSmartPythonSettings().enabled) return;
+	if (!readToolPythonSettings().enabled) return;
 
 	pi.registerTool({
 		name: "python",
-		label: "smartpython",
+		label: "tool-python",
 		description: TOOL_DESCRIPTION,
 		parameters: pythonParameters,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -315,7 +322,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				if (uv !== "uv") fs.accessSync(uv, fs.constants.X_OK);
 			} catch {
-				const details: SmartPythonDetails = {
+				const details: ToolPythonDetails = {
 					status: "uv-missing", name, directory, waitS, run: "", log: "", script: "", deps,
 					pythonVersion, head: [], tail: [], totalLines: 0,
 				};
@@ -342,7 +349,7 @@ export default function (pi: ExtensionAPI) {
 			const metaPath = path.join(runDir, "meta.json");
 			const outputText = (text: string) => boundText(text, TOOL_OUTPUT_BYTES, `\n… [output truncated; full log: ${logPath}] …\n`);
 			fs.writeFileSync(scriptPath, code.endsWith("\n") ? code : `${code}\n`);
-			const writeMeta = (patch: Partial<SmartPythonDetails> & Record<string, unknown>) =>
+			const writeMeta = (patch: Partial<ToolPythonDetails> & Record<string, unknown>) =>
 				fs.writeFileSync(metaPath, JSON.stringify({ run, name, deps, pythonVersion, directory, waitS, ...patch }, null, 2));
 
 			const args = ["run", "--quiet", "--no-progress"];
@@ -396,7 +403,7 @@ export default function (pi: ExtensionAPI) {
 							content: [{
 								type: "text" as const,
 								text: outputText(
-									`[smartpython] timed out waiting after ${waitS}s — "${name}" is still running (pid ${pid}).\n` +
+									`[tool-python] timed out waiting after ${waitS}s — "${name}" is still running (pid ${pid}).\n` +
 									`log: ${logPath}\n` +
 									`poll: bash { name: "check ${slug}", command: "tail -n 200 '${logPath}'", timeout: 10 }\n` +
 									`stop: bash { name: "stop ${slug}", command: "kill ${pid}" }\n` +
@@ -405,19 +412,19 @@ export default function (pi: ExtensionAPI) {
 							details: {
 								status: "timeout", name, directory, waitS, run, log: logPath, script: scriptPath, deps,
 								pythonVersion, pid, elapsedS, head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
-							} as SmartPythonDetails,
+							} as ToolPythonDetails,
 						};
 					}
 					if (Date.now() - lastUi >= UI_INTERVAL_MS) {
 						lastUi = Date.now();
 						const preview = pollLog();
 						onUpdate?.({
-							content: [{ type: "text" as const, text: outputText(`[smartpython] ${name} — running ${Math.round((Date.now() - started) / 1000)}s`) }],
+							content: [{ type: "text" as const, text: outputText(`[tool-python] ${name} — running ${Math.round((Date.now() - started) / 1000)}s`) }],
 							details: {
 								status: "running", name, directory, waitS, run, log: logPath, script: scriptPath, deps,
 								pythonVersion, pid, elapsedS: Number(((Date.now() - started) / 1000).toFixed(1)),
 								head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
-							} as SmartPythonDetails,
+							} as ToolPythonDetails,
 						});
 					}
 					await wait(POLL_MS);
@@ -444,11 +451,11 @@ export default function (pi: ExtensionAPI) {
 				const preview = pollLog();
 				writeMeta({ status: "aborted", pid, log: logPath });
 				return {
-					content: [{ type: "text" as const, text: outputText(`[smartpython] aborted — killed "${name}" (pid ${pid}).\nlog: ${logPath}`) }],
+					content: [{ type: "text" as const, text: outputText(`[tool-python] aborted — killed "${name}" (pid ${pid}).\nlog: ${logPath}`) }],
 					details: {
 						status: "aborted", name, directory, waitS, run, log: logPath, script: scriptPath, deps, pythonVersion, pid,
 						head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
-					} as SmartPythonDetails,
+					} as ToolPythonDetails,
 				};
 			}
 			if (spawnError) throw new Error(`failed to start uv: ${spawnError.message}`);
@@ -457,18 +464,18 @@ export default function (pi: ExtensionAPI) {
 			const { text, totalLines, elided } = elideLog(logPath);
 			const elapsedS = Number(((Date.now() - started) / 1000).toFixed(1));
 			writeMeta({ status: "done", pid, log: logPath, exit, elapsedS, signal: exitSignal, totalLines });
-			const statusLine = `[smartpython] done exit=${exit}${exitSignal ? ` (${exitSignal})` : ""} · ${elapsedS}s · "${name}"`;
+			const statusLine = `[tool-python] done exit=${exit}${exitSignal ? ` (${exitSignal})` : ""} · ${elapsedS}s · "${name}"`;
 			return {
 				content: [{ type: "text" as const, text: outputText(text.trim() ? `${statusLine}\n${text}` : statusLine) }],
 				details: {
 					status: "done", name, directory, waitS, run, log: logPath, script: scriptPath, deps, pythonVersion,
 					pid, exit, signal: exitSignal, elapsedS, head: preview.head, tail: preview.tail, totalLines, elided,
-				} as SmartPythonDetails,
+				} as ToolPythonDetails,
 			};
 		},
 
 		renderCall(args, theme) {
-			const title = theme.fg("toolTitle", theme.bold("smartpython ")) + theme.fg("accent", args.name ?? "");
+			const title = theme.fg("toolTitle", theme.bold("tool-python ")) + theme.fg("accent", args.name ?? "");
 			const bits: string[] = [];
 			if (Array.isArray(args.deps) && args.deps.length) bits.push(theme.fg("muted", `uv --with ${args.deps.join(", ")}`));
 			if (typeof args.python === "string" && args.python.trim()) bits.push(theme.fg("muted", `py ${args.python.trim()}`));
@@ -478,11 +485,11 @@ export default function (pi: ExtensionAPI) {
 			const all = highlightPython(code);
 			for (const l of all.slice(0, CALL_CODE_LINES)) lines.push(`  ${l}`);
 			if (all.length > CALL_CODE_LINES) lines.push(theme.fg("muted", `  … ${all.length - CALL_CODE_LINES} more lines (script.py on disk)`));
-			return new Text(lines.join("\n"), 0, 0);
+			return new BoxedText(lines, { border: (s) => theme.fg("muted", s), label: " python " });
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
-			const d = (result.details ?? {}) as Partial<SmartPythonDetails>;
+			const d = (result.details ?? {}) as Partial<ToolPythonDetails>;
 			const lines: string[] = [];
 			const elapsed = d.elapsedS !== undefined ? ` · ${d.elapsedS}s` : "";
 			if (isPartial) {
@@ -499,7 +506,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (expanded && !isPartial) {
 				let output = result.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-				if (d.status === "done") output = output.replace(/^\[smartpython\][^\n]*(?:\n|$)/, "");
+				if (d.status === "done") output = output.replace(/^\[(?:tool-python|smartpython)\][^\n]*(?:\n|$)/, "");
 				if (output) for (const line of output.split("\n")) lines.push(`  ${theme.fg("dim", line)}`);
 			} else {
 				const head = (d.head ?? []).slice(0, 3);
@@ -510,7 +517,7 @@ export default function (pi: ExtensionAPI) {
 				for (const l of tail) lines.push(`  ${theme.fg("dim", l)}`);
 			}
 			if (d.status === "timeout" || d.elided === true || (d.totalLines ?? 0) > 16) lines.push(theme.fg("muted", `  log: ${d.log ?? ""}`));
-			return new Text(lines.join("\n"), 0, 0);
+			return new BoxedText(lines, { border: (s) => theme.fg("muted", s), label: " python " });
 		},
 	});
 }

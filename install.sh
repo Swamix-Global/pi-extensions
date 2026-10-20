@@ -5,12 +5,15 @@ set -euo pipefail
 
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-packages=(smartbash smartpython sgai-formatter openai-settings fallback-compaction search-tools)
+packages=(tool-bash tool-python sgai-formatter util-openai util-compaction tool-search)
 
 bash "$source_dir/scripts/build-all.sh"
 
 install -d "$agent_dir/extensions"
 rm -f "$agent_dir/lib/extension-settings.mjs"   # settings helper is inlined into every bundle
+
+# Clean up retired pre-migration folders so pi does not load obsolete duplicates.
+rm -rf "$agent_dir/extensions/smartbash" "$agent_dir/extensions/smartpython" "$agent_dir/extensions/openai-settings" "$agent_dir/extensions/fallback-compaction" "$agent_dir/extensions/search-tools"
 
 for package in "${packages[@]}"; do
   target="$agent_dir/extensions/$package"
@@ -23,4 +26,4 @@ for package in "${packages[@]}"; do
 done
 
 printf 'Extensions installed in %s/extensions. Run /reload in existing Pi sessions to activate.\n' "$agent_dir"
-printf 'Packages query-engine and subagentx register themselves: python3 query-engine/reinstall.py, bash subagentx/install.sh.\n'
+printf 'Packages tool-query and tool-subagentx register themselves: python3 tool-query/reinstall.py, bash tool-subagentx/install.sh.\n'

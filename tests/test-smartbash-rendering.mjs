@@ -1,4 +1,4 @@
-// Renderer regressions for the installed smartbash extension. Run through commit hooks.
+// Renderer regressions for the installed tool-bash extension. Run through commit hooks.
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import test from "node:test";
 import { createJiti } from "/usr/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi/agent");
-const source = join(agentDir, "extensions", "smartbash.ts");
+const source = join(agentDir, "extensions", "tool-bash", "build", "tool-bash.js");
 const jiti = createJiti(source);
 const { default: register } = await jiti.import(source);
 const { visibleWidth } = await jiti.import("@earendil-works/pi-tui");
@@ -19,13 +19,13 @@ const theme = {
   fg: (_color, text) => `\x1b[36m${text}\x1b[39m`,
   bold: (text) => `\x1b[1m${text}\x1b[22m`,
 };
-const compact = (lines) => stripVTControlCharacters(lines.join("\n")).replace(/\s/g, "");
+const compact = (lines) => stripVTControlCharacters(lines.join("\n")).replace(/\s/g, "").replace(/[│╭╮╰╯─]/g, "");
 const checkWidth = (lines, width) => {
   for (const line of lines) assert.ok(visibleWidth(line) <= width, `line exceeds ${width} columns`);
 };
 const marker = `metric{model="granite-4.2-3b-awq",rank="0",value="${"x".repeat(200)}"}END`;
 const result = {
-  content: [{ type: "text", text: `[smartbash] done exit=0\nfirst\nMIDDLE_OUTPUT\n${marker}\nlast` }],
+  content: [{ type: "text", text: `[tool-bash] done exit=0\nfirst\nMIDDLE_OUTPUT\n${marker}\nlast` }],
   details: { status: "done", exit: 0, head: ["first", marker], tail: ["last"], totalLines: 4 },
 };
 
@@ -64,7 +64,7 @@ test("Unicode and ANSI remain width-safe after resize and invalidation", () => {
 test("expanded results retain the existing large-output elision notice and log path", () => {
   const log = "/tmp/full-smartbash-output.log";
   const output = {
-    content: [{ type: "text", text: `[smartbash] done exit=0\nfirst\n... [800 lines elided; full log: ${log}] ...\nlast` }],
+    content: [{ type: "text", text: `[tool-bash] done exit=0\nfirst\n... [800 lines elided; full log: ${log}] ...\nlast` }],
     details: { ...result.details, elided: true, log, totalLines: 1000 },
   };
   const lines = tool.renderResult(output, { expanded: true, isPartial: false }, theme).render(24);

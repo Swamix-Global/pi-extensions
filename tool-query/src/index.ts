@@ -70,10 +70,9 @@ function asUsage(usage: any) {
   };
 }
 
-export default function evidenceExtension(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "evidence",
-    label: "Evidence Fanout",
+export default function toolQueryExtension(pi: ExtensionAPI) {
+  const toolDefinition = {
+    label: "tool-query",
     description:
       'Compile a source-verified evidence packet for one question about a folder: deterministic windows are selected by question terms, then a local model cites line ranges in parallel and quotes are rebuilt from the files themselves — verbatim by construction, with bad ranges and absence claims rejected. Scenario styles that work well: curiosity — {"folder":"/abs/repo","question":"how does request cancellation tear down child processes"}; refactor impact — {"folder":"/abs/repo","question":"if sendUserMessage signature changes, which callers and tests are affected"}; failure behavior — {"folder":"/abs/repo","question":"what happens when the formatter listener never replies"}. Phrase questions with concrete symbols and one intent; quotes cite exact lines, so read those spans before editing. Enumerate eligible files without model calls with {"folder":"/abs/repo","listFiles":true}.',
     promptSnippet: "Fanout one question across deterministic code windows; get verbatim-validated line-cited evidence packets.",
@@ -106,15 +105,15 @@ export default function evidenceExtension(pi: ExtensionAPI) {
       })),
     }),
     outputSchema: Type.Union([evidencePacketSchema, listSchema]),
-    renderCall(args, theme) {
+    renderCall(args: any, theme: any) {
       return new Text(
-        theme.fg("toolTitle", theme.bold("evidence ")) + theme.fg("accent", args.folder || "…") +
+        theme.fg("toolTitle", theme.bold("tool-query ")) + theme.fg("accent", args.folder || "…") +
         "\n" + theme.fg("muted", args.listFiles ? "enumerate eligible files" : args.question || "…"),
         0, 0,
       );
     },
-    renderResult(result, { expanded, isPartial }, theme) {
-      const text = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    renderResult(result: any, { expanded, isPartial }: any, theme: any) {
+      const text = result.content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n");
       if (isPartial) return new Text(theme.fg("muted", text.split("\n")[0] + " …"), 0, 0);
       const lines = text.split("\n");
       const shown = expanded ? lines : lines.slice(0, 24);
@@ -122,7 +121,7 @@ export default function evidenceExtension(pi: ExtensionAPI) {
       view.addChild(new Markdown("```yaml\n" + shown.join("\n") + (shown.length < lines.length ? "\n… expand for the full packet" : "") + "\n```", 0, 0, getMarkdownTheme()));
       return view;
     },
-    async execute(_id, params, signal) {
+    async execute(_id: string, params: any, signal: any) {
       const rawFolder = typeof params.folder === "string" ? params.folder : "";
       if (!rawFolder.trim() || !path.isAbsolute(rawFolder)) throw new Error("folder must be a non-empty absolute path.");
       const listFiles = params.listFiles === true;
@@ -150,5 +149,8 @@ export default function evidenceExtension(pi: ExtensionAPI) {
         ...(structured.usage ? { usage: asUsage(structured.usage) } : {}),
       };
     },
-  });
+  };
+
+  pi.registerTool({ name: "evidence", ...toolDefinition });
+  pi.registerTool({ name: "query", ...toolDefinition });
 }

@@ -1,19 +1,19 @@
 {
-  "name": "@sgai/pi-search-tools",
+  "name": "@sgai/pi-tool-bash",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "web_search / web_fetch across deepseek, brave, perplexity, searxng and antigravity with per-call provider selection and failover.",
+  "description": "tool-bash: Display-first bash tool override for Pi: named commands, bounded timeouts, pid/poll/kill handoff, full logs.",
   "keywords": [
     "pi-extension"
   ],
   "pi": {
     "extensions": [
-      "build/search-tools.js"
+      "build/tool-bash.js"
     ]
   },
   "scripts": {
-    "build": "bash ../../scripts/build-extension.sh search-tools"
+    "build": "bash ../../scripts/build-extension.sh tool-bash"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

@@ -2894,20 +2894,25 @@ async function showSubagentSettings(ctx: ExtensionCommandContext): Promise<void>
 }
 
 function registerSubagentSettings(pi: ExtensionAPI): void {
+	const handler = async (_args: string, ctx: ExtensionCommandContext) => {
+		if (ctx.hasUI && ctx.mode === "tui") {
+			await showSubagentSettings(ctx);
+			return;
+		}
+		const cfg = readSettings();
+		ctx.ui.notify(
+			`tool-subagentx (SubagentX) ${settingSource("enabled")} ${cfg.enabled ? "enabled" : "disabled"} — pool: ${settingSource("subagentModels")} ${cfg.subagentModels.join(" → ")} · local: ${settingSource("localModel")} ${cfg.localModel} @ ${settingSource("localBackendUrl")} ${cfg.localBackendUrl}`,
+			"info",
+		);
+	};
 	try {
+		pi.registerCommand?.("settings:tool-subagentx", {
+			description: "[u] (settings.json:extensionSettings.subagentx) tool-subagentx settings — ordered model pool, local compressor, compression prompt suffix",
+			handler,
+		});
 		pi.registerCommand?.("settings:subagentx", {
-			description: "[u] (settings.json:extensionSettings.subagentx) SubagentX settings — ordered model pool, local compressor, compression prompt suffix",
-			handler: async (_args: string, ctx: ExtensionCommandContext) => {
-				if (ctx.hasUI && ctx.mode === "tui") {
-					await showSubagentSettings(ctx);
-					return;
-				}
-				const cfg = readSettings();
-				ctx.ui.notify(
-					`SubagentX ${settingSource("enabled")} ${cfg.enabled ? "enabled" : "disabled"} — pool: ${settingSource("subagentModels")} ${cfg.subagentModels.join(" → ")} · local: ${settingSource("localModel")} ${cfg.localModel} @ ${settingSource("localBackendUrl")} ${cfg.localBackendUrl}`,
-					"info",
-				);
-			},
+			description: "[u] (alias for /settings:tool-subagentx) — /settings:subagentx",
+			handler,
 		});
 	} catch {}
 }
@@ -2967,7 +2972,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "subagentx",
-		label: "SubagentX",
+		label: "tool-subagentx",
 		description: "Delegate one job to a leaf subagent via a shared contract. For launches, provide a meaningful title explaining the objective, scope, and expected outcome; 20+ words is an advisory target, not a requirement. Any nonempty title, including a short title, is accepted and preserved verbatim without truncation; omitted titles are generated. Before each spawn, relevant completed contracts are injected automatically as subordinate references and the child TASK carries the original query verbatim. Shape the contract to request the parent's optimizations: one batched round of independent, fast, bounded tool calls and a concise evidence return. Every launch blocks in place until the run settles and returns the final result — one run, one tool result, never a background handle; batch independent launches into one round so they run concurrently. Re-attach to an already-launched run with run=<stem>, which also waits in place until it settles.",
 		renderShell: "self",
 		parameters: Type.Object({

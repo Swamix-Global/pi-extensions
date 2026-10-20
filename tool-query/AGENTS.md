@@ -9,7 +9,7 @@ line-range citations validated against disk, quotes rebuilt from files.
 - `query_engine/` — `engine.py` (scanner/enumeration), `fanout.py` (selection,
   extraction, validation, assembly, cache), `store.py` (private SQLite cache),
   `__main__.py` (CLI)
-- `src/index.ts` + `build/sgai-evidence.js` — pi tool wiring; `package.json` manifest
+- `src/index.ts` + `build/tool-query.js` — pi tool wiring; `package.json` manifest
 - `tests/fanout_unit.py` — offline validation suite (no network/inference)
 - `reinstall.py` — `pi install` + absolute-path package registration
 

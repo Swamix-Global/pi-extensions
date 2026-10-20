@@ -1,5 +1,5 @@
 /**
- * search-tools — pluggable multi-provider web search for Pi.
+ * tool-search — pluggable multi-provider web search for Pi.
  *
  * One canonical `web_search` tool aggregating: deepseek (Search API),
  * brave (Search API), perplexity (sonar), searxng (open-source metasearch,

@@ -5,14 +5,14 @@
   "type": "module",
   "description": "Pi extension workspace: one npm package per extension, each self-contained and built to a single-file bundle under build/.",
   "workspaces": [
-    "smartpython",
-    "smartbash",
+    "tool-bash",
+    "tool-python",
     "sgai-formatter",
-    "openai-settings",
-    "fallback-compaction",
-    "search-tools",
-    "query-engine",
-    "subagentx"
+    "util-openai",
+    "util-compaction",
+    "tool-search",
+    "tool-query",
+    "tool-subagentx"
   ],
   "scripts": {
     "build": "bash scripts/build-all.sh",

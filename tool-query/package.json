@@ -1,16 +1,16 @@
 {
-  "name": "pi-evidence-engine",
+  "name": "@sgai/pi-tool-query",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Deterministic source-verified evidence engine for Pi, backed by a local fanout CLI.",
+  "description": "tool-query: Deterministic source-verified evidence query engine for Pi, backed by a local fanout CLI.",
   "scripts": {
-    "build": "bash ../scripts/build-extension.sh query-engine",
+    "build": "bash ../scripts/build-extension.sh tool-query",
     "test": "python3 -B tests/fanout_unit.py",
     "evidence": "python3 -B cli.py"
   },
   "pi": {
-    "extensions": ["build/sgai-evidence.js"]
+    "extensions": ["build/tool-query.js"]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -26,6 +26,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { BoxedText } from "./box.ts";
 import { readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
 import { boundText, TOOL_OUTPUT_BYTES } from "./output-budget.ts";
 
@@ -39,7 +40,7 @@ const VERBATIM_LINES = 200;
 const VERBATIM_BYTES = TOOL_OUTPUT_BYTES - 4096; // room for status and retrieval metadata
 const ELIDE_SIDE_LINES = 100;
 
-export interface SmartBashDetails {
+export interface ToolBashDetails {
 	status: "running" | "done" | "timeout" | "aborted" | "blocked";
 	name: string;
 	directory: string;
@@ -56,12 +57,12 @@ export interface SmartBashDetails {
 	elided?: boolean;
 }
 
-export function readSmartBashSettings(): { enabled: boolean } {
+export function readToolBashSettings(): { enabled: boolean } {
 	const enabled = readExtensionSettings("smartBash").enabled;
 	return { enabled: typeof enabled === "boolean" ? enabled : true };
 }
 
-export function writeSmartBashSettings(enabled: boolean): boolean {
+export function writeToolBashSettings(enabled: boolean): boolean {
 	try {
 		writeExtensionSettings("smartBash", { enabled });
 		return true;
@@ -226,25 +227,31 @@ const smartBashParameters = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	const commandHandler = async (args: string, ctx: { ui: { notify: (msg: string, type: "info" | "warning") => void } }) => {
+		const arg = args.trim().toLowerCase();
+		if (arg === "on" || arg === "off") {
+			writeToolBashSettings(arg === "on");
+			ctx.ui.notify(`tool-bash is now ${arg}. Run /reload to apply.`, "info");
+		} else {
+			const current = readToolBashSettings().enabled ? "on" : "off";
+			ctx.ui.notify(`tool-bash is currently ${current}. Use '/settings:tool-bash on|off' to toggle.`, "info");
+		}
+	};
+
+	pi.registerCommand("settings:tool-bash", {
+		description: "Toggle the tool-bash tool: /settings:tool-bash [on|off]",
+		handler: commandHandler,
+	});
 	pi.registerCommand("settings:smartbash", {
-		description: "Toggle the smartbash tool: /settings:smartbash [on|off]",
-		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-			if (arg === "on" || arg === "off") {
-				writeSmartBashSettings(arg === "on");
-				ctx.ui.notify(`smartbash is now ${arg}. Run /reload to apply.`, "info");
-			} else {
-				const current = readSmartBashSettings().enabled ? "on" : "off";
-				ctx.ui.notify(`smartbash is currently ${current}. Use '/settings:smartbash on|off' to toggle.`, "info");
-			}
-		},
+		description: "Toggle the tool-bash tool (alias): /settings:smartbash [on|off]",
+		handler: commandHandler,
 	});
 
-	if (!readSmartBashSettings().enabled) return;
+	if (!readToolBashSettings().enabled) return;
 
 	pi.registerTool({
 		name: "bash",
-		label: "smartbash",
+		label: "tool-bash",
 		description:
 			"Execute a bash command with live head+tail progress. Params: name (required, purpose in ≤5 words), " +
 			"command (bash; one command per line, ideally ≤3 chained), directory (optional working dir, default " +
@@ -252,7 +259,7 @@ export default function (pi: ExtensionAPI) {
 			"completion with the output (huge outputs elided head+tail, full log path included); if still running " +
 			"at the deadline it returns immediately without blocking with the pid and log path — poll later with " +
 			"`tail` on the log or stop with `kill <pid>`. Catastrophic commands (rm -rf /, mkfs, raw-disk dd, fork " +
-			"bombs) are rejected. Each call is logged under <project>/.pi/smartbash/.",
+			"bombs) are rejected. Each call is logged under <project>/.pi/tool-bash/.",
 		parameters: smartBashParameters,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const command = typeof params.command === "string" ? params.command : "";
@@ -272,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 								"restate it in a narrower, explicit form (e.g. target a specific path instead of /).",
 						},
 					],
-					details: { status: "blocked", name, head: [], tail: [], totalLines: 0, run: "", log: "", waitS: 0, directory: "" } as SmartBashDetails,
+					details: { status: "blocked", name, head: [], tail: [], totalLines: 0, run: "", log: "", waitS: 0, directory: "" } as ToolBashDetails,
 				};
 			}
 
@@ -295,7 +302,7 @@ export default function (pi: ExtensionAPI) {
 			const outputText = (text: string) => boundText(text, TOOL_OUTPUT_BYTES, `\n… [output truncated; full log: ${logPath}] …\n`);
 			const metaPath = path.join(runDir, "meta.json");
 			fs.writeFileSync(path.join(runDir, "cmd.sh"), `#!/usr/bin/env bash\n${command}\n`);
-			const writeMeta = (patch: Partial<SmartBashDetails> & Record<string, unknown>) =>
+			const writeMeta = (patch: Partial<ToolBashDetails> & Record<string, unknown>) =>
 				fs.writeFileSync(metaPath, JSON.stringify({ run, name, command, directory, waitS, ...patch }, null, 2));
 
 			const logFd = fs.openSync(logPath, "a");
@@ -340,7 +347,7 @@ export default function (pi: ExtensionAPI) {
 								{
 									type: "text" as const,
 									text: outputText(
-										`[smartbash] timed out waiting after ${waitS}s — "${name}" is still running (pid ${pid}).\n` +
+										`[tool-bash] timed out waiting after ${waitS}s — "${name}" is still running (pid ${pid}).\n` +
 										`log: ${logPath}\n` +
 										`poll: bash { name: "check ${slug}", command: "tail -n 200 '${logPath}'", timeout: 10 }\n` +
 										`stop: bash { name: "stop ${slug}", command: "kill ${pid}" }\n` +
@@ -350,19 +357,19 @@ export default function (pi: ExtensionAPI) {
 							details: {
 								status: "timeout", name, directory, waitS, run, log: logPath, pid,
 								elapsedS, head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
-							} as SmartBashDetails,
+							} as ToolBashDetails,
 						};
 					}
 					if (Date.now() - lastUi >= UI_INTERVAL_MS) {
 						lastUi = Date.now();
 						const preview = pollLog();
 						onUpdate?.({
-							content: [{ type: "text" as const, text: outputText(`[smartbash] ${name} — running ${Math.round((Date.now() - started) / 1000)}s`) }],
+							content: [{ type: "text" as const, text: outputText(`[tool-bash] ${name} — running ${Math.round((Date.now() - started) / 1000)}s`) }],
 							details: {
 								status: "running", name, directory, waitS, run, log: logPath, pid,
 								elapsedS: Number(((Date.now() - started) / 1000).toFixed(1)),
 								head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
-							} as SmartBashDetails,
+							} as ToolBashDetails,
 						});
 					}
 					await wait(POLL_MS);
@@ -389,11 +396,11 @@ export default function (pi: ExtensionAPI) {
 				const preview = pollLog();
 				writeMeta({ status: "aborted", pid, log: logPath });
 				return {
-					content: [{ type: "text" as const, text: outputText(`[smartbash] aborted — killed "${name}" (pid ${pid}).\nlog: ${logPath}`) }],
+					content: [{ type: "text" as const, text: outputText(`[tool-bash] aborted — killed "${name}" (pid ${pid}).\nlog: ${logPath}`) }],
 					details: {
 						status: "aborted", name, directory, waitS, run, log: logPath, pid,
 						head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
-					} as SmartBashDetails,
+					} as ToolBashDetails,
 				};
 			}
 			if (spawnError) throw new Error(`failed to start command: ${spawnError.message}`);
@@ -402,27 +409,27 @@ export default function (pi: ExtensionAPI) {
 			const { text, totalLines, elided } = elideLog(logPath);
 			const elapsedS = Number(((Date.now() - started) / 1000).toFixed(1));
 			writeMeta({ status: "done", pid, log: logPath, exit, elapsedS, signal: exitSignal, totalLines });
-			const statusLine = `[smartbash] done exit=${exit}${exitSignal ? ` (${exitSignal})` : ""} · ${elapsedS}s · "${name}"`;
+			const statusLine = `[tool-bash] done exit=${exit}${exitSignal ? ` (${exitSignal})` : ""} · ${elapsedS}s · "${name}"`;
 			return {
 				content: [{ type: "text" as const, text: outputText(text.trim() ? `${statusLine}\n${text}` : statusLine) }],
 				details: {
 					status: "done", name, directory, waitS, run, log: logPath, pid, exit, signal: exitSignal,
 					elapsedS, head: preview.head, tail: preview.tail, totalLines, elided,
-				} as SmartBashDetails,
+				} as ToolBashDetails,
 			};
 		},
 
 		renderCall(args, theme) {
-			const title = theme.fg("toolTitle", theme.bold("smartbash ")) + theme.fg("accent", args.name ?? "");
+			const title = theme.fg("toolTitle", theme.bold("tool-bash ")) + theme.fg("accent", args.name ?? "");
 			const dirHint = theme.fg("muted", `· ${args.directory ? shortenHome(String(args.directory)) : "~ (project)"}`);
 			const tHint = theme.fg("muted", `· ${typeof args.timeout === "number" ? Math.min(args.timeout, MAX_WAIT_S) : DEFAULT_WAIT_S}s`);
 			const lines = [`${title} ${dirHint} ${tHint}`];
 			for (const l of String(args.command ?? "").split("\n")) lines.push(`  ${theme.fg("dim", l)}`);
-			return new Text(lines.join("\n"), 0, 0);
+			return new BoxedText(lines, { border: (s) => theme.fg("muted", s), label: " bash " });
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
-			const d = (result.details ?? {}) as Partial<SmartBashDetails>;
+			const d = (result.details ?? {}) as Partial<ToolBashDetails>;
 			const lines: string[] = [];
 			const elapsed = d.elapsedS !== undefined ? ` · ${d.elapsedS}s` : "";
 			if (isPartial) {
@@ -439,7 +446,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (expanded && !isPartial) {
 				let output = result.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-				if (d.status === "done") output = output.replace(/^\[smartbash\][^\n]*(?:\n|$)/, "");
+				if (d.status === "done") output = output.replace(/^\[(?:tool-bash|smartbash)\][^\n]*(?:\n|$)/, "");
 				if (output) for (const line of output.split("\n")) lines.push(`  ${theme.fg("dim", line)}`);
 			} else {
 				const head = (d.head ?? []).slice(0, 3);
@@ -450,11 +457,11 @@ export default function (pi: ExtensionAPI) {
 				for (const l of tail) lines.push(`  ${theme.fg("dim", l)}`);
 			}
 			if (d.status === "timeout" || elidedOrLong(d)) lines.push(theme.fg("muted", `  log: ${d.log ?? ""}`));
-			return new Text(lines.join("\n"), 0, 0);
+			return new BoxedText(lines, { border: (s) => theme.fg("muted", s), label: " bash " });
 		},
 	});
 }
 
-function elidedOrLong(d: Partial<SmartBashDetails>): boolean {
+function elidedOrLong(d: Partial<ToolBashDetails>): boolean {
 	return d.elided === true || (d.totalLines ?? 0) > 2 * ((d.head?.length ?? 0) + (d.tail?.length ?? 0)) + 6;
 }

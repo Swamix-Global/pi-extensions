@@ -1,19 +1,19 @@
 {
-  "name": "@sgai/pi-smartbash",
+  "name": "@sgai/pi-tool-search",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Display-first bash tool override for Pi: named commands, bounded timeouts, pid/poll/kill handoff, full logs.",
+  "description": "tool-search: web_search / web_fetch across deepseek, brave, perplexity, searxng and antigravity with per-call provider selection and failover.",
   "keywords": [
     "pi-extension"
   ],
   "pi": {
     "extensions": [
-      "build/smartbash.js"
+      "build/tool-search.js"
     ]
   },
   "scripts": {
-    "build": "bash ../../scripts/build-extension.sh smartbash"
+    "build": "bash ../../scripts/build-extension.sh tool-search"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

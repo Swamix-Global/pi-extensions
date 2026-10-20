@@ -1,12 +1,12 @@
 {
-  "name": "pi-subagent-pack",
+  "name": "@sgai/pi-tool-subagentx",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "SubagentX for Pi as a single-file optimized build, with installer and uninstaller.",
+  "description": "tool-subagentx: SubagentX delegation for Pi as a single-file optimized build, with installer and uninstaller.",
   "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["build/sgai-subagentx.js"]
+    "extensions": ["build/tool-subagentx.js"]
   },
   "scripts": {
     "build": "bash build.sh"

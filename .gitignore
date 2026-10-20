@@ -6,4 +6,5 @@ __pycache__/
 .env
 .env.*
 build/
+tool-subagentx/node_modules
 subagentx/node_modules

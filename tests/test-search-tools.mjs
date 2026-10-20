@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 const flags = process.argv.slice(2);
 const agentDir = flags.find((a) => !a.startsWith("--")) || process.env.HOME + "/.pi/agent";
 const REAL_HOME = process.env.HOME || os.homedir(); // captured before any test swaps HOME
-const extFile = path.join(agentDir, "extensions", "search-tools", "index.ts");
+const extFile = path.join(agentDir, "extensions", "tool-search", "build", "tool-search.js");
 const extUrl = pathToFileURL(extFile).href;
 const mod = await createJiti(extUrl).import(extUrl);
 

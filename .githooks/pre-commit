@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/build-extension.sh smartbash
-bash scripts/build-extension.sh fallback-compaction
+bash scripts/build-extension.sh tool-bash
+bash scripts/build-extension.sh util-compaction
 node scripts/test-context-budget.mjs

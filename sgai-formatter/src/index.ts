@@ -71,11 +71,134 @@ function colorizeStatusGlyphs(line: string): string {
 
 function highlightSource(code: string, lang: string): string[] {
 	if (!code) return [];
+	const normalized = lang.trim().toLowerCase();
+	if (normalized === "yaml" || normalized === "yml") return highlightYaml(code);
 	try {
 		return highlightCode(code, lang);
 	} catch {
 		return code.split("\n");
 	}
+}
+
+// cli-highlight's yaml grammar paints whole lines one flat color (keys, values,
+// comments alike), which reads as lost formatting. This line-oriented colorizer
+// restores structure: keys, strings, numbers, literals, comments, punctuation.
+const YAML_COLOR = {
+	key: "\x1b[38;5;75m",
+	string: "\x1b[38;5;114m",
+	number: "\x1b[38;5;209m",
+	literal: "\x1b[38;5;176m",
+	punct: "\x1b[38;5;245m",
+	comment: "\x1b[2m",
+	reset: "\x1b[39m",
+	dim: "\x1b[2m",
+};
+
+function yamlSpan(color: string, text: string): string {
+	return `${color}${text}${YAML_COLOR.reset}`;
+}
+
+/** Color one scalar token (no quotes, no key colon): number, literal, or plain string. */
+function yamlScalar(text: string): string {
+	if (/^(true|false|null|~|yes|no|on|off)$/i.test(text)) return yamlSpan(YAML_COLOR.literal, text);
+	if (/^[+-]?(\d[\d_]*(\.\d+)?([eE][+-]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|\.inf|\.nan)$/i.test(text))
+		return yamlSpan(YAML_COLOR.number, text);
+	return yamlSpan(YAML_COLOR.string, text);
+}
+
+/** Split "key: value" / "key:" at the first structural colon outside quotes. */
+function yamlSplitKey(rest: string): { key: string; value: string } | undefined {
+	let quote: string | undefined;
+	for (let i = 0; i < rest.length; i++) {
+		const ch = rest[i];
+		if (quote) {
+			if (ch === "\\" && quote === '"') i++;
+			else if (ch === quote) quote = undefined;
+		} else if (ch === '"' || ch === "'") {
+			quote = ch;
+		} else if (ch === ":" && (i + 1 === rest.length || rest[i + 1] === " ")) {
+			return { key: rest.slice(0, i + 1), value: rest.slice(i + 1) };
+		}
+	}
+	return undefined;
+}
+
+/** Color a value segment: flow collections, quoted strings, scalars, trailing comments. */
+function yamlValue(value: string): string {
+	let out = "";
+	let rest = value;
+	const flowMatch = rest.match(/^(\s*)([\[{])([\s\S]*?)([\]}])(\s*)(#.*)?$/);
+	if (flowMatch) {
+		out += flowMatch[1];
+		out += yamlSpan(YAML_COLOR.punct, flowMatch[2]);
+		for (const part of flowMatch[3].split(/(,)/)) {
+			const trimmed = part.trim();
+			out += part === "," ? yamlSpan(YAML_COLOR.punct, ",") : part.length ? (trimmed ? yamlScalar(trimmed).replace(trimmed, yamlScalar(part.trim())) : part) : part;
+			if (part === ",") continue;
+		}
+		out += yamlSpan(YAML_COLOR.punct, flowMatch[4]);
+		out += flowMatch[5];
+		if (flowMatch[6]) out += yamlSpan(YAML_COLOR.comment, flowMatch[6]);
+		return out;
+	}
+	const trailing = rest.match(/^(\s)(#.*)$/);
+	if (trailing) return yamlValue(rest.slice(0, trailing.index)) + yamlSpan(YAML_COLOR.comment, trailing[2]);
+	const quoted = rest.match(/^(\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*)$/);
+	if (quoted) return `${quoted[1]}${yamlSpan(YAML_COLOR.string, quoted[2])}${quoted[3]}`;
+	const block = rest.match(/^(\s*)([|>][-+]?)(\s*)$/);
+	if (block) return `${block[1]}${yamlSpan(YAML_COLOR.punct, block[2])}${block[3]}`;
+	const lead = rest.match(/^\s*/);
+	const core = rest.slice(lead?.[0].length ?? 0);
+	return `${lead?.[0] ?? ""}${core ? yamlScalar(core) : ""}`;
+}
+
+/** Highlight one YAML line; `blockIndent` tracks | /> block-scalar bodies to leave them plain. */
+function yamlLine(line: string, state: { blockIndent: number }): string {
+	if (state.blockIndent > 0) {
+		const indent = line.match(/^\s*/)?.[0].length ?? 0;
+		if (line.trim() === "" || indent >= state.blockIndent) return line;
+		state.blockIndent = 0;
+	}
+	if (line.trim() === "") return line;
+	const comment = line.match(/^(\s*)(#.*)$/);
+	if (comment) return `${comment[1]}${yamlSpan(YAML_COLOR.comment, comment[2])}`;
+	const indent = line.match(/^\s*/)?.[0] ?? "";
+	let rest = line.slice(indent.length);
+	let prefix = "";
+	const dash = rest.match(/^(-\s+)([\s\S]*)$/);
+	if (dash) {
+		prefix += yamlSpan(YAML_COLOR.punct, "-") + " ";
+		rest = dash[2];
+	}
+	const split = yamlSplitKey(rest);
+	if (split) {
+		const keyText = split.key.replace(/:$/, "");
+		const shown = split.key.endsWith(":") ? keyText : keyText;
+		let out = prefix + yamlSpan(YAML_COLOR.key, shown) + yamlSpan(YAML_COLOR.punct, ":");
+		const value = split.value;
+		const blockScalar = value.match(/^(\s+)([|>][-+]?)(\s*)$/);
+		if (blockScalar) {
+			state.blockIndent = indent.length + 2;
+			out += `${blockScalar[1]}${yamlSpan(YAML_COLOR.punct, blockScalar[2])}${blockScalar[3]}`;
+		} else if (value.trim()) {
+			out += yamlValue(value);
+		}
+		return out;
+	}
+	if (dash) return prefix + yamlValue(rest);
+	if (/^[&*][\w-]+/.test(rest)) return indent + yamlSpan(YAML_COLOR.punct, rest);
+	return indent + rest;
+}
+
+export function highlightYaml(code: string): string[] {
+	const state = { blockIndent: 0 };
+	return code.split("\n").map((line) => {
+		try {
+			return yamlLine(line, state);
+		} catch {
+			return line;
+		}
+	});
 }
 
 function formatCodeBlock(lines: string[], lang: string, availableWidth?: number): string {

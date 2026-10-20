@@ -25,7 +25,7 @@ const subagentxFile = path.join(root, "extensions", "sgai-subagentx.ts");
 // SubagentX ships as its own package (subagent-pack); its flat extension only exists
 // when it was installed the old way. Its pool checks are skipped otherwise.
 const subagentx = fs.existsSync(subagentxFile) ? await import(subagentxFile) : null;
-const compaction = await import(path.join(root, "extensions", "fallback-compaction.ts"));
+const compaction = await import(path.join(root, "extensions", "util-compaction", "build", "util-compaction.js"));
 
 const silentCtx = { ui: { notify: () => {} } };
 const commandSpecs = {};
@@ -80,10 +80,20 @@ try {
 		on: (event, handler) => (hooks[event] = handler),
 		registerCommand: (name, spec) => { captureCommand(name, spec); compactionHandler = spec.handler; },
 	});
-	assertCommandDescription("fallback-compaction", "fallbackCompaction");
+	assertCommandDescription("util-compaction", "utilCompaction");
+	assertCommandDescription("fallback-compaction", "fallbackCompaction"); // legacy alias kept
 	assert.equal(typeof hooks.agent_settled, "function", "agent_settled hook is registered");
-	assert.equal(hooks.turn_end, undefined, "turn_end must not be registered");
 	assert.equal(hooks.agent_end, undefined, "agent_end must not be registered");
+	// turn_end now bounds tool output via context edits; it must never compact the live run.
+	if (hooks.turn_end) {
+		let liveCompactions = 0;
+		await hooks.turn_end({ context: { contextEntries: [] } }, {
+			getContextUsage: () => ({ tokens: 105000, contextWindow: 200000, percent: 52.5 }),
+			compact: () => { liveCompactions++; },
+			ui: { notify: () => {} },
+		});
+		assert.equal(liveCompactions, 0, "turn_end must never compact a live run");
+	}
 
 	compaction.writeSettings({ enabled: true, thresholdTokens: 100000 });
 	let settledCalls = 0;

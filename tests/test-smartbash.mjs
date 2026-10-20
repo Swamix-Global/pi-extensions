@@ -1,4 +1,4 @@
-// Drives the real smartbash tool execute() from ~/.pi/agent/extensions/smartbash.ts
+// Drives the real tool-bash execute() from ~/.pi/agent/extensions/tool-bash/build/tool-bash.js
 // against real processes via jiti. Usage: node test-smartbash.mjs <piAgentDir> <workDir>
 import { createJiti } from "/usr/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 import * as fs from "node:fs";
@@ -6,8 +6,8 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [, , agentDir, workDir] = process.argv;
-const jiti = createJiti(pathToFileURL(path.join(agentDir, "extensions", "smartbash.ts")).href);
-const mod = await jiti.import(pathToFileURL(path.join(agentDir, "extensions", "smartbash.ts")).href);
+const jiti = createJiti(pathToFileURL(path.join(agentDir, "extensions", "tool-bash", "build", "tool-bash.js")).href);
+const mod = await jiti.import(pathToFileURL(path.join(agentDir, "extensions", "tool-bash", "build", "tool-bash.js")).href);
 
 let tool;
 const pi = {

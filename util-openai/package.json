@@ -1,0 +1,21 @@
+{
+  "name": "@sgai/pi-util-openai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-request OpenAI configuration utility: service tier default (priority) with /settings:util-openai selector.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/util-openai.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh util-openai"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
