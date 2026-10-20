@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { createServer } from "node:http";
 import { createJiti } from "/usr/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -38,6 +39,9 @@ const result = (id, value) => ({ role: "toolResult", toolCallId: id, toolName: "
 let checks = 0;
 const check = (name, fn) => { fn(); checks++; console.log(`PASS ${name}`); };
 try {
+  check("inlined package budget copies cannot drift silently", () => {
+    assert.equal(fs.readFileSync(`${root}/smartbash/src/output-budget.ts`, "utf8"), fs.readFileSync(`${root}/fallback-compaction/src/output-budget.ts`, "utf8"));
+  });
   check("UTF-8 cap, both ends, marker included, exact boundaries", () => {
     for (const limit of [0, 1, 63, 1024, 65536]) {
       for (const value of ["x".repeat(4000000), "🙂汉字".repeat(300000), "a\n".repeat(100000)]) {
@@ -71,6 +75,14 @@ try {
       assert.ok(!out.text.match(/-\d+ of \d+ lines/));
     }
   });
+  check("decoded binary output cannot expand beyond the byte cap", () => {
+    const file = path.join(temp, "invalid-utf8");
+    fs.writeFileSync(file, Buffer.alloc(60000, 0xff));
+    const out = bash.elideLog(file);
+    assert.ok(Buffer.byteLength(out.text) <= budget.TOOL_OUTPUT_BYTES);
+    assert.equal(out.elided, true);
+    assert.ok(out.text.includes(file));
+  });
   check("all text blocks share a single cap; images survive unchanged", () => {
     const image = { type: "image", data: "abc", mimeType: "image/png" };
     const out = budget.boundContent([...text("x".repeat(100000)), image, ...text("y".repeat(100000)), ...text("")], 8192);
@@ -93,6 +105,11 @@ try {
     assert.equal(out.structuredContent, undefined);
     assert.equal(hooks.tool_result({ content: text("small"), structuredContent: { a: 1 } }, ctx), undefined);
   });
+  check("nested programmatic results retain their schema until outer output", () => {
+    const event = { parentToolCallId: "outer", content: text("small"), structuredContent: { data: "x".repeat(1000000) } };
+    assert.equal(hooks.tool_result(event, ctx), undefined);
+    assert.equal(event.structuredContent.data.length, 1000000);
+  });
   check("disk failure stays bounded and preserves original in session details", () => {
     const saved = process.env.PI_EXTENSION_SETTINGS_PATH;
     const file = path.join(temp, "not-a-directory");
@@ -109,12 +126,19 @@ try {
     const manager = SessionManager.inMemory(temp);
     for (let i = 0; i < 12; i++) manager.appendMessage(result(`t${i}`, "x".repeat(65536)));
     const projection = manager.buildSessionProjection();
-    const out = hooks.turn_end({ context: { contextEntries: projection.entries } }, ctx);
-    assert.equal(out.entries.length, 12);
-    for (const edit of out.entries) manager.appendContextEdit(edit.targetId, edit.replacement);
+    const earlier = { type: "custom", customType: "earlier-handler", data: { keep: true } };
+    const out = hooks.turn_end({ entries: [earlier], context: { contextEntries: projection.entries } }, ctx);
+    assert.equal(out.entries[0], earlier);
+    assert.equal(out.entries.length, 13);
+    for (const edit of out.entries.filter((entry) => entry.type === "context_edit")) manager.appendContextEdit(edit.targetId, edit.replacement);
     assert.ok(manager.buildSessionProjection().messages.reduce((n, m) => n + budget.textBytes(m.content), 0) <= budget.REQUEST_TOOL_OUTPUT_BYTES);
     assert.equal(aborts, 0);
     assert.equal(compactions, 0);
+  });
+  check("within-budget historical results stay unchanged for prefix caching", () => {
+    const messages = [result("large", "x".repeat(60000)), ...Array.from({ length: 64 }, (_, i) => result(String(i), "small"))];
+    const out = hooks.context_with_system({ messages }, ctx);
+    for (let i = 0; i < messages.length; i++) assert.equal(out.messages[i], messages[i]);
   });
   check("legacy compaction retains giant pair; request repair preserves IDs and system", () => {
     const manager = SessionManager.inMemory(temp);
@@ -175,6 +199,29 @@ try {
     assert.equal(live.details.elided, true);
     console.log(JSON.stringify({ realProcess: { returnedBytes: budget.textBytes(live.content), logBytes: fs.statSync(live.details.log).size } }));
   });
+  const largeName = await tool.execute("large-name", { name: "name".repeat(100000), command: "echo small", directory: temp }, undefined, undefined, ctx);
+  check("complete result cap includes oversized status and metadata text", () => {
+    assert.ok(budget.textBytes(largeName.content) <= budget.TOOL_OUTPUT_BYTES);
+    assert.ok(largeName.content[0].text.includes("full log:"));
+  });
+
+  let requests = 0;
+  const server = createServer((_req, res) => { requests++; res.writeHead(500); res.end("unexpected request"); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const controller = new AbortController();
+    hooks.context_with_system({ messages: [{ role: "user", content: "x".repeat(1000000), timestamp: 1 }] }, { ...ctx, abort: () => controller.abort() });
+    const { completeSimple } = await import(`${sdkRoot}/node_modules/@earendil-works/pi-ai/dist/compat.js`);
+    const response = await completeSimple({
+      id: "budget-test", name: "budget-test", api: "openai-completions", provider: "budget-test",
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 100,
+    }, { messages: [{ role: "user", content: "should not be transmitted", timestamp: 1 }] }, { apiKey: "local-test-only", signal: controller.signal });
+    check("actual provider adapter sends no HTTP request after safety abort", () => {
+      assert.equal(requests, 0);
+      assert.equal(response.stopReason, "aborted");
+    });
+  } finally { await new Promise((resolve) => server.close(resolve)); }
   console.log(`${checks} context-budget regression groups passed`);
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });

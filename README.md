@@ -64,9 +64,41 @@ not this tree.
 3. Append `<name>` to the root `workspaces` array, `scripts/build-all.sh`, and the
    `packages` array in `install.sh` when it should deploy flat.
 
+## Context-output safety
+
+Smartbash enforces a **64 KiB UTF-8 cap on the complete returned text**, including status
+and retrieval metadata. Line elision alone is not a size limit: even a one-line log can
+be megabytes. Log scanning uses fixed-size buffers; original logs stay untouched.
+
+The fallback-compaction package also registers output-safety hooks, independently of
+its optional settled-only 50k-token proactive compaction:
+
+- Direct model-visible tool text is capped at 64 KiB; full results are archived under
+  `<agent-dir>/artifacts/tool-output/<sha256>.json` with mode `0600`.
+- Nested tool results keep their programmatic schemas; only the enclosing model-visible
+  output is capped. Scripts can therefore filter large datasets before returning them.
+- `turn_end` adds reversible `context_edit` replacements when aggregate tool text exceeds
+  128 KiB (less for small-context models), preserving earlier handlers' proposals.
+- `context_with_system` repairs legacy oversized tool results before a request, preserving
+  system state and call/result identity. Within-budget messages are not rewritten.
+- Conservative residual-input estimates request an abort when oversized user/system/tool
+  declarations remain. This is a safety estimate, not an exact tokenizer or provider-limit
+  guarantee. No instructions or conversation history are silently deleted.
+- If archiving fails, new direct output remains bounded and its full original is retained
+  in non-model-visible tool-result details. Legacy originals remain in session history.
+
+Run `/reload` after deployment. Existing session files are never rewritten. Read artifacts
+using bounded slices rather than loading an entire result back into context.
+
+Install the local regression gate once with `git config core.hooksPath .githooks`.
+The pre-commit hook builds both affected packages and checks byte limits, Unicode/binary
+expansion, parallel aggregates, hook composition, nested schemas, disk failure, legacy
+compaction, the real 4 MB bash reproduction, and provider cancellation without network IO.
+
 ## Tests
 
 ```sh
+git -c core.hooksPath=.githooks hook run pre-commit   # context-output safety gate
 cd query-engine && python3 -B tests/fanout_unit.py     # offline evidence-engine validation
 node --test ../tests/test-subagent-rendering.mjs       # umbrella repo; real Pi TUI, run install.sh first
 ```

@@ -157,10 +157,15 @@ export function elideLog(logPath: string): { text: string; totalLines: number; e
 		if (lastByte !== -1 && lastByte !== 10) totalLines++;
 		const sample = (start: number, length: number) => {
 			const count = fs.readSync(fd, buffer, 0, length, start);
-			return buffer.subarray(0, count).toString("utf8");
+			let first = 0;
+			if (start > 0) while (first < count && (buffer[first] & 0xc0) === 0x80) first++;
+			return new TextDecoder().decode(buffer.subarray(first, count), { stream: start + count < bytes });
 		};
-		if (bytes <= VERBATIM_BYTES && totalLines <= VERBATIM_LINES)
-			return { text: sample(0, bytes).replace(/\n$/, ""), totalLines, elided: false };
+		if (bytes <= VERBATIM_BYTES && totalLines <= VERBATIM_LINES) {
+			const raw = sample(0, bytes).replace(/\n$/, "");
+			const text = boundText(raw, VERBATIM_BYTES, `\n… [decoded output truncated; full log: ${logPath}] …\n`);
+			return { text, totalLines, elided: text !== raw };
+		}
 		const head = sample(0, Math.min(bytes, VERBATIM_BYTES)).split("\n").slice(0, ELIDE_SIDE_LINES).join("\n");
 		const tail = sample(Math.max(0, bytes - VERBATIM_BYTES), Math.min(bytes, VERBATIM_BYTES)).replace(/\n$/, "").split("\n").slice(-ELIDE_SIDE_LINES).join("\n");
 		const omitted = Math.max(0, totalLines - 2 * ELIDE_SIDE_LINES);
@@ -287,6 +292,7 @@ export default function (pi: ExtensionAPI) {
 			const runDir = path.join(runsDir, run);
 			fs.mkdirSync(runDir, { recursive: true });
 			const logPath = path.join(runDir, "out.log");
+			const outputText = (text: string) => boundText(text, TOOL_OUTPUT_BYTES, `\n… [output truncated; full log: ${logPath}] …\n`);
 			const metaPath = path.join(runDir, "meta.json");
 			fs.writeFileSync(path.join(runDir, "cmd.sh"), `#!/usr/bin/env bash\n${command}\n`);
 			const writeMeta = (patch: Partial<SmartBashDetails> & Record<string, unknown>) =>
@@ -333,12 +339,12 @@ export default function (pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text" as const,
-									text:
+									text: outputText(
 										`[smartbash] timed out waiting after ${waitS}s — "${name}" is still running (pid ${pid}).\n` +
 										`log: ${logPath}\n` +
 										`poll: bash { name: "check ${slug}", command: "tail -n 200 '${logPath}'", timeout: 10 }\n` +
 										`stop: bash { name: "stop ${slug}", command: "kill ${pid}" }\n` +
-										(tailText ? `\n${tailText}` : ""),
+										(tailText ? `\n${tailText}` : "")),
 								},
 							],
 							details: {
@@ -351,7 +357,7 @@ export default function (pi: ExtensionAPI) {
 						lastUi = Date.now();
 						const preview = pollLog();
 						onUpdate?.({
-							content: [{ type: "text" as const, text: `[smartbash] ${name} — running ${Math.round((Date.now() - started) / 1000)}s` }],
+							content: [{ type: "text" as const, text: outputText(`[smartbash] ${name} — running ${Math.round((Date.now() - started) / 1000)}s`) }],
 							details: {
 								status: "running", name, directory, waitS, run, log: logPath, pid,
 								elapsedS: Number(((Date.now() - started) / 1000).toFixed(1)),
@@ -383,7 +389,7 @@ export default function (pi: ExtensionAPI) {
 				const preview = pollLog();
 				writeMeta({ status: "aborted", pid, log: logPath });
 				return {
-					content: [{ type: "text" as const, text: `[smartbash] aborted — killed "${name}" (pid ${pid}).\nlog: ${logPath}` }],
+					content: [{ type: "text" as const, text: outputText(`[smartbash] aborted — killed "${name}" (pid ${pid}).\nlog: ${logPath}`) }],
 					details: {
 						status: "aborted", name, directory, waitS, run, log: logPath, pid,
 						head: preview.head, tail: preview.tail, totalLines: preview.totalLines,
@@ -398,7 +404,7 @@ export default function (pi: ExtensionAPI) {
 			writeMeta({ status: "done", pid, log: logPath, exit, elapsedS, signal: exitSignal, totalLines });
 			const statusLine = `[smartbash] done exit=${exit}${exitSignal ? ` (${exitSignal})` : ""} · ${elapsedS}s · "${name}"`;
 			return {
-				content: [{ type: "text" as const, text: text.trim() ? `${statusLine}\n${text}` : statusLine }],
+				content: [{ type: "text" as const, text: outputText(text.trim() ? `${statusLine}\n${text}` : statusLine) }],
 				details: {
 					status: "done", name, directory, waitS, run, log: logPath, pid, exit, signal: exitSignal,
 					elapsedS, head: preview.head, tail: preview.tail, totalLines, elided,

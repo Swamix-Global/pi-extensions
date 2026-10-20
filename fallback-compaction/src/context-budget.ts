@@ -30,14 +30,29 @@ function requestToolBudget(ctx: ExtensionContext) {
   return Math.min(REQUEST_TOOL_OUTPUT_BYTES, Math.floor((ctx.model?.contextWindow ?? 65536) * 1.5));
 }
 
+/** Leave small results unchanged; only share the aggregate cap among large results. */
+function resultLimit(contents: Content[], ctx: ExtensionContext) {
+  let remaining = requestToolBudget(ctx);
+  let count = contents.length;
+  for (const size of contents.map(textBytes).sort((a, b) => a - b)) {
+    const cap = Math.min(TOOL_OUTPUT_BYTES, Math.floor(remaining / count));
+    if (size > cap) return cap;
+    remaining -= size;
+    count--;
+  }
+  return TOOL_OUTPUT_BYTES;
+}
+
 function bounded(content: Content, limit: number, payload: unknown, settingsFile: string): Content {
   if (textBytes(content) <= limit) return content;
   return boundContent(content, limit, marker(archive(payload, settingsFile)));
 }
 
 export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => string) {
-  // Direct tools, MCP and nested codemode results pass through this hook.
+  // Nested results belong to code, not the model. Preserve their schemas so scripts
+  // can filter full data; the enclosing model-visible tool result is capped instead.
   pi.on("tool_result", (event, ctx) => {
+    if (event.parentToolCallId) return;
     const content = event.content;
     const structuredBytes = event.structuredContent === undefined ? 0 : Buffer.byteLength(JSON.stringify(event.structuredContent));
     const limit = Math.min(TOOL_OUTPUT_BYTES, requestToolBudget(ctx));
@@ -64,8 +79,8 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
       .filter((message) => message.role === "toolResult")
       .map((message) => ({ id: entry.sourceEntry.id, message })));
     if (!results.length) return;
-    const perResult = Math.min(TOOL_OUTPUT_BYTES, Math.floor(requestToolBudget(ctx) / results.length));
-    const entries = [];
+    const perResult = resultLimit(results.map(({ message }) => message.content), ctx);
+    const entries = [...event.entries];
     for (const { id, message } of results) {
       try {
         const content = bounded(message.content, perResult, message, settingsPath());
@@ -80,7 +95,7 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
   // Repair old/resumed sessions too. Preserve system state and every call/result ID.
   pi.on("context_with_system", (event, ctx) => {
     const results = event.messages.filter((message) => message.role === "toolResult");
-    const perResult = Math.min(TOOL_OUTPUT_BYTES, Math.floor(requestToolBudget(ctx) / Math.max(1, results.length)));
+    const perResult = resultLimit(results.map((message) => message.content), ctx);
     let repaired = 0;
     const messages = event.messages.map((message) => {
       if (message.role !== "toolResult") return message;
