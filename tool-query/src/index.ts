@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Text } from "@earendil-works/pi-tui";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 
 const cli = fileURLToPath(new URL("../cli.py", import.meta.url));
 
@@ -71,6 +71,21 @@ function asUsage(usage: any) {
 }
 
 export default function toolQueryExtension(pi: ExtensionAPI) {
+  // Custom Markdown components do not inherit assistant-message transformers. Ask the
+  // formatter for its boxed YAML rendering at layout time, using this component's actual
+  // width; with no listener (formatter disabled) the native Markdown code block remains.
+  const formattedMarkdown = (markdown: string, messageType = "toolResult") =>
+    new Markdown(markdown, 0, 0, getMarkdownTheme(), undefined, {
+      transform(value: string, availableWidth: number) {
+        let formatted = value;
+        pi.events?.emit("sgai:format-markdown", {
+          markdown: value, availableWidth, messageType,
+          reply(next: string) { formatted = next; },
+        });
+        return formatted;
+      },
+    });
+
   const toolDefinition = {
     label: "tool-query",
     description:
@@ -117,9 +132,8 @@ export default function toolQueryExtension(pi: ExtensionAPI) {
       if (isPartial) return new Text(theme.fg("muted", text.split("\n")[0] + " …"), 0, 0);
       const lines = text.split("\n");
       const shown = expanded ? lines : lines.slice(0, 24);
-      const view = new Container();
-      view.addChild(new Markdown("```yaml\n" + shown.join("\n") + (shown.length < lines.length ? "\n… expand for the full packet" : "") + "\n```", 0, 0, getMarkdownTheme()));
-      return view;
+      const note = shown.length < lines.length ? "\n_… expand for the full packet_" : "";
+      return formattedMarkdown("```yaml\n" + shown.join("\n") + "\n```" + note);
     },
     async execute(_id: string, params: any, signal: any) {
       const rawFolder = typeof params.folder === "string" ? params.folder : "";

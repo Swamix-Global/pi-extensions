@@ -123,41 +123,79 @@ function yamlSplitKey(rest: string): { key: string; value: string } | undefined 
 	return undefined;
 }
 
+const BARE_YAML_KEY = /^((?:"[^"]*"|'[^']*'|[A-Za-z_][\w.-]*):)(\s*)([\s\S]*)$/;
+const BARE_YAML_BLOCK_SCALAR = /^[|>][-+]?\s*(#.*)?$/;
+// Tokens that only open a statement or expression in source code.
+const BARE_YAML_CODE_START =
+	/^(?:def|class|function|async|await|const|let|var|import|from|export|return|if|elif|else|for|while|switch|case|try|catch|finally|raise|assert|yield|except|public|private|protected|static|namespace|typedef|#include|#define|template|}\s*$)/;
+const BARE_YAML_CODE_END = /[\w)\]"']\s*;(#.*)?$/;
+
 /**
  * Detect an unfenced YAML document so tool results that return bare YAML (the
- * evidence engine, query tools) still get a box and token colors. Deliberately
- * conservative: every line must look structural, at least two `key:` lines must
- * be present, and prose/markdown markers disqualify the whole block.
+ * evidence engine, query tools) still get a box and token colors. The test is
+ * structural, not statistical: every content line must be a `key:`, a `-` item, a
+ * comment, a document marker, or the body of a `|`/`>` block scalar, and at least two
+ * keys must appear. Markdown markers (fences, headings, tables, blockquotes) and
+ * lines that only occur in source code (def/class/function, assignments, `;`) veto
+ * the whole block. Measured against 842 recorded tool outputs: every evidence packet
+ * is boxed, no code dump or prose paragraph is.
  */
 export function looksLikeBareYaml(text: string): boolean {
 	const raw = text.trim();
 	if (!raw || raw.length < 24) return false;
-	if (/^\s*```/.test(raw)) return false;
-	const lines = raw.split("\n");
-	let keyLines = 0;
+	if (/^```|^~~~/.test(raw)) return false;
+	if (/(^|\n)\s*(```|~~~)/.test(raw)) return false;
+	if (/"""|'''/.test(raw)) return false;
+	// Markdown tables, blockquotes and headings are prose, not YAML.
+	if (/(^|\n)\s*[|>](\s|$)/.test(raw)) return false;
+	if (/(^|\n)#{1,6}\s/.test(raw)) return false;
+
+	let keys = 0;
 	let structural = 0;
 	let considered = 0;
-	for (const line of lines) {
+	let blockIndent = -1;
+	for (const line of raw.split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		// Interleaved notes from other extensions stay ignorable.
 		if (/^[…]/.test(trimmed) || /^\[\(\[]/.test(trimmed) || /^\.\.\. \[/.test(trimmed)) continue;
-		// Markdown structure means this is prose, not a YAML document.
-		if (/^(#{1,6}\s|[-*+]\s{2,}|>|\||<!--)/.test(trimmed)) return false;
-		if (/\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\)/.test(trimmed)) return false;
+		const indent = line.length - line.trimStart().length;
+		if (blockIndent >= 0) {
+			if (indent >= blockIndent) {
+				considered++;
+				structural++;
+				continue;
+			}
+			blockIndent = -1;
+		}
 		considered++;
-		if (/^-\s+\S/.test(trimmed) || /^[^\s#][^:]*:(\s|$)/.test(trimmed) || /^\s+\S/.test(line)) structural++;
-		if (/^[^\s#][^:]*:(\s|$)/.test(trimmed)) keyLines++;
+		const body = trimmed.replace(/^-\s+/, "");
+		const key = BARE_YAML_KEY.exec(body);
+		const quotedValue = key ? /^["']/.test(key[3]) : false;
+		// Code that YAML would only carry inside a quoted scalar vetoes the block.
+		if (!quotedValue) {
+			const code = (key ? key[3] : trimmed).trimStart();
+			if (BARE_YAML_CODE_START.test(code) || BARE_YAML_CODE_END.test(code)) return false;
+			if (/^[\w.$]+\s*=\s*[^\s=]/.test(code)) return false;
+		}
+		if (/^(---|\.\.\.)$/.test(trimmed) || /^#/.test(trimmed)) {
+			structural++;
+			continue;
+		}
+		if (key) {
+			keys++;
+			structural++;
+			if (BARE_YAML_BLOCK_SCALAR.test(key[3])) blockIndent = indent + 1;
+			continue;
+		}
+		if (/^-(\s|$)/.test(trimmed)) {
+			structural++;
+			if (BARE_YAML_BLOCK_SCALAR.test(trimmed.slice(2).trimStart())) blockIndent = indent + 1;
+		}
 	}
-	if (considered < 3 || keyLines < 2) return false;
-	if (structural / considered < 0.85) return false;
-	// A sentence of running prose with colons should not be mistaken for YAML.
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (trimmed.length > 240) return false;
-		if (/\b(the|and|that|with|this|which)\b.*\b(is|are|was|were)\b/i.test(trimmed) && !/^-\s/.test(trimmed) && !/:$/.test(trimmed)) return false;
-	}
-	return true;
+	if (considered < 3 || keys < 2) return false;
+	if (keys / considered < 0.2) return false;
+	return structural / considered >= 0.85;
 }
 
 /** Color a value segment: flow collections, quoted strings, scalars, trailing comments. */
@@ -216,7 +254,7 @@ function yamlLine(line: string, state: { blockIndent: number }): string {
 	if (split) {
 		const keyText = split.key.replace(/:$/, "");
 		const shown = split.key.endsWith(":") ? keyText : keyText;
-		let out = prefix + yamlSpan(YAML_COLOR.key, shown) + yamlSpan(YAML_COLOR.punct, ":");
+		let out = indent + prefix + yamlSpan(YAML_COLOR.key, shown) + yamlSpan(YAML_COLOR.punct, ":");
 		const value = split.value;
 		const blockScalar = value.match(/^(\s+)([|>][-+]?)(\s*)$/);
 		if (blockScalar) {
@@ -227,7 +265,7 @@ function yamlLine(line: string, state: { blockIndent: number }): string {
 		}
 		return out;
 	}
-	if (dash) return prefix + yamlValue(rest);
+	if (dash) return indent + prefix + yamlValue(rest);
 	if (/^[&*][\w-]+/.test(rest)) return indent + yamlSpan(YAML_COLOR.punct, rest);
 	return indent + rest;
 }

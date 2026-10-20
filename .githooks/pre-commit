@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# Build every bundle the regression suites read, so a commit can never carry a stale build.
 bash scripts/build-extension.sh tool-bash
 bash scripts/build-extension.sh util-compaction
+bash scripts/build-extension.sh sgai-formatter
+bash scripts/build-extension.sh tool-query
 node scripts/test-context-budget.mjs
+node --test tests/test-formatter-yaml.mjs

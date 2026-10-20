@@ -18,4 +18,7 @@ mkdir -p "$package/$(dirname "$entry")"
   --external "@earendil-works/pi-tui" \
   --external "@earendil-works/pi-ai" \
   --external "typebox"
+# Keep only the manifest entry: bundles from earlier package names would otherwise linger
+# in build/ and load twice for packages Pi registers by path.
+find "$package/$(dirname "$entry")" -maxdepth 1 -type f ! -name "$(basename -- "$entry")" -delete
 printf '%s/%s %s bytes\n' "${package#"$root/"}" "$entry" "$(wc -c < "$package/$entry")"

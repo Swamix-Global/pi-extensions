@@ -66,10 +66,12 @@ JSON output embeds a pre-rendered `yaml` field for tool rendering.
 
 ## Pi extension
 
-`src/index.ts` (built to `build/sgai-evidence.js`) registers the `evidence` tool: parameters
+`src/index.ts` (built to `build/tool-query.js`) registers the `evidence` and `query` tools: parameters
 `folder`, `question`, optional `listFiles`, `windows` (2–24, default 12) and
-`concurrency` (2–32, default 12). Results render as fenced YAML; `usage`
-reports local tokens at zero cost. Install the package:
+`concurrency` (2–32, default 12). Results render as fenced YAML, and the renderer asks the
+formatter through the synchronous `sgai:format-markdown` event so the packet is boxed and
+token-colored at layout width; without a formatter listener the native Markdown code block
+remains. `usage` reports local tokens at zero cost. Install the package:
 
 ```sh
 python3 reinstall.py   # pi install + absolute-path registration
