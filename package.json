@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Pi extension workspace: one npm package per extension, each self-contained and built to a single-file bundle under build/.",
   "workspaces": [
+    "smartpython",
     "smartbash",
     "sgai-formatter",
     "openai-settings",

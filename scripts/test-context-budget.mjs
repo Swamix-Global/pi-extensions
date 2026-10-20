@@ -39,6 +39,27 @@ const result = (id, value) => ({ role: "toolResult", toolCallId: id, toolName: "
 let checks = 0;
 const check = (name, fn) => { fn(); checks++; console.log(`PASS ${name}`); };
 try {
+  check("proactive compaction defaults to 100k, not 50k, and triggers at exactly 100k", () => {
+    const original = fs.readFileSync(process.env.PI_EXTENSION_SETTINGS_PATH);
+    try {
+      fs.writeFileSync(process.env.PI_EXTENSION_SETTINGS_PATH, JSON.stringify({ extensionSettings: { fallbackCompaction: { enabled: true } } }));
+      assert.equal(fallback.DEFAULT_FALLBACK_COMPACTION_THRESHOLD, 100000);
+      assert.equal(fallback.readSettings().thresholdTokens, 100000);
+      const checker = fallback.createCompactionChecker();
+      let tokens = 50000;
+      let calls = 0;
+      const context = { ...ctx, getContextUsage: () => ({ tokens }), compact: () => { calls++; } };
+      assert.equal(checker.checkAndCompact(context), false);
+      tokens = 99999;
+      assert.equal(checker.checkAndCompact(context), false);
+      tokens = 100000;
+      assert.equal(checker.checkAndCompact(context), true);
+      assert.equal(calls, 1);
+    } finally {
+      fs.writeFileSync(process.env.PI_EXTENSION_SETTINGS_PATH, original);
+    }
+  });
+
   check("inlined package budget copies cannot drift silently", () => {
     assert.equal(fs.readFileSync(`${root}/smartbash/src/output-budget.ts`, "utf8"), fs.readFileSync(`${root}/fallback-compaction/src/output-budget.ts`, "utf8"));
   });

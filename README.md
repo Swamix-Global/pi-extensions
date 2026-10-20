@@ -8,7 +8,7 @@ target, never the source of truth.
 ## Install
 
 ```sh
-bash install.sh                 # build every package, deploy the five light extensions
+bash install.sh                 # build every package, deploy the six light extensions
 bash subagentx/install.sh       # build + register SubagentX as a pi package
 python3 query-engine/reinstall.py   # register the evidence engine package
 ```
@@ -26,9 +26,10 @@ its own inlined `src/extension-settings.ts` helper (no shared lib import at runt
 | Path | Purpose |
 | --- | --- |
 | `smartbash/` | Bash override: named commands, timeouts, pid/poll/kill handoff, full logs under `<cwd>/.pi/smartbash/`, head/tail preview. `/settings:smartbash` |
+| `smartpython/` | uv-based `python` tool: arbitrary on-the-fly scripts with ephemeral deps, syntax-highlighted call view, per-run `script.py`/`out.log` under `<cwd>/.pi/smartpython/`. `/settings:smartpython` |
 | `sgai-formatter/` | Width-aware assistant/tool Markdown rendering, including boxed YAML; answers the synchronous `sgai:format-markdown` event for SubagentX. |
 | `openai-settings/` | Default OpenAI `serviceTier` (priority) applied per request; `/settings:openai [priority\|default\|auto\|flex]`. |
-| `fallback-compaction/` | Triggers native `ctx.compact()` when estimated context crosses the threshold (default 50k); `/settings:fallback-compaction [on\|off\|<tokens>]`. |
+| `fallback-compaction/` | Triggers native `ctx.compact()` when estimated context crosses the threshold (default 100k); `/settings:fallback-compaction [on\|off\|<tokens>]`. |
 | `search-tools/` | `web_search` / `web_fetch` across deepseek, brave, perplexity, searxng and antigravity, with per-call provider selection and automatic failover. |
 | `query-engine/` | Evidence engine package (`pi-evidence-engine`): `evidence` tool, Python CLI, tests and `reinstall.py`. Self-registers. |
 | `subagentx/` | SubagentX package: `src/sgai-subagentx.ts`, minified `build/sgai-subagentx.js`, `install.sh` / `uninstall.sh`. Self-registers. |
@@ -71,7 +72,7 @@ and retrieval metadata. Line elision alone is not a size limit: even a one-line 
 be megabytes. Log scanning uses fixed-size buffers; original logs stay untouched.
 
 The fallback-compaction package also registers output-safety hooks, independently of
-its optional settled-only 50k-token proactive compaction:
+its optional settled-only 100k-token proactive compaction:
 
 - Direct model-visible tool text is capped at 64 KiB; full results are archived under
   `<agent-dir>/artifacts/tool-output/<sha256>.json` with mode `0600`.
@@ -104,5 +105,3 @@ node --test ../tests/test-subagent-rendering.mjs       # umbrella repo; real Pi 
 ```
 
 Suites drive installed or built copies, so build before testing.
-
-Not in this tree: `zai-pack` ships its own MCP extensions as a separate package.

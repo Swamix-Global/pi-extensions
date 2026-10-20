@@ -5,7 +5,7 @@ set -euo pipefail
 
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-packages=(smartbash sgai-formatter openai-settings fallback-compaction search-tools)
+packages=(smartbash smartpython sgai-formatter openai-settings fallback-compaction search-tools)
 
 bash "$source_dir/scripts/build-all.sh"
 

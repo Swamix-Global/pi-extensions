@@ -2,7 +2,7 @@
  * Native Fallback Compaction Extension for Pi.
  *
  * Caps tool results during live runs and repairs oversized legacy request context.
- * If settled context reaches the proactive threshold (default: 50,000 tokens),
+ * If settled context reaches the proactive threshold (default: 100,000 tokens),
  * this automatically triggers Pi's native compaction (`ctx.compact()`), creating
  * a structured CompactionEntry in the session and reclaiming context.
  */
@@ -17,7 +17,7 @@ import type {
 import { extensionSettingsFilePath, readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
 import { registerContextBudget } from "./context-budget.ts";
 
-export const DEFAULT_FALLBACK_COMPACTION_THRESHOLD = 50_000;
+export const DEFAULT_FALLBACK_COMPACTION_THRESHOLD = 100_000;
 
 export const settingsPath = extensionSettingsFilePath;
 
