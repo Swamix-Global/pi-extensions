@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { estimateTokens, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
-import { boundContent, textBytes, TOOL_OUTPUT_BYTES, REQUEST_TOOL_OUTPUT_BYTES } from "../../smartbash/src/output-budget.ts";
+import { boundContent, textBytes, TOOL_OUTPUT_BYTES, REQUEST_TOOL_OUTPUT_BYTES } from "./output-budget.ts";
 
 type Content = (TextContent | ImageContent)[];
 
