@@ -1,0 +1,23 @@
+{
+  "name": "@sgai/pi-search-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "web_search / web_fetch across deepseek, brave, perplexity, searxng and antigravity with per-call provider selection and failover.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/search-tools.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh search-tools"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

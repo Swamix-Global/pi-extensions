@@ -26,7 +26,8 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { readExtensionSettings, writeExtensionSettings } from "../lib/extension-settings.mjs";
+import { readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
+import { boundText, TOOL_OUTPUT_BYTES } from "./output-budget.ts";
 
 const DEFAULT_WAIT_S = 60;
 const MAX_WAIT_S = 60;
@@ -35,7 +36,7 @@ const UI_INTERVAL_MS = 1000;
 const PREVIEW_BYTES = 4096;
 const KEEP_LINES = 5;
 const VERBATIM_LINES = 200;
-const VERBATIM_BYTES = 65536;
+const VERBATIM_BYTES = TOOL_OUTPUT_BYTES - 4096; // room for status and retrieval metadata
 const ELIDE_SIDE_LINES = 100;
 
 export interface SmartBashDetails {
@@ -124,10 +125,11 @@ export function makeLogWatcher(logPath: string) {
 			return { head, tail: [], totalLines };
 		}
 		if (pos === 0 && bytes > 0) head = lines(read(0, Math.min(bytes, PREVIEW_BYTES))).filter(Boolean).slice(0, KEEP_LINES);
-		if (bytes > pos) {
-			const chunk = read(pos, bytes - pos);
+		while (bytes > pos) {
+			const length = Math.min(bytes - pos, VERBATIM_BYTES);
+			const chunk = read(pos, length);
 			totalLines += (chunk.match(/\n/g) ?? []).length;
-			pos = bytes;
+			pos += length;
 		}
 		let tail: string[] = [];
 		if (bytes > 0) {
@@ -139,17 +141,34 @@ export function makeLogWatcher(logPath: string) {
 }
 
 export function elideLog(logPath: string): { text: string; totalLines: number; elided: boolean } {
-	const raw = fs.readFileSync(logPath, "utf8");
-	const all = raw.split("\n");
-	if (all.length > 0 && all[all.length - 1] === "") all.pop();
-	const bytes = Buffer.byteLength(raw);
-	if (all.length <= VERBATIM_LINES && bytes <= VERBATIM_BYTES)
-		return { text: all.join("\n"), totalLines: all.length, elided: false };
-	const head = all.slice(0, ELIDE_SIDE_LINES).join("\n");
-	const tail = all.slice(-ELIDE_SIDE_LINES).join("\n");
-	const marker =
-		`... [${all.length - 2 * ELIDE_SIDE_LINES} of ${all.length} lines elided; full log: ${logPath}] ...`;
-	return { text: `${head}\n${marker}\n${tail}`, totalLines: all.length, elided: true };
+	const fd = fs.openSync(logPath, "r");
+	try {
+		const bytes = fs.fstatSync(fd).size;
+		const buffer = Buffer.alloc(VERBATIM_BYTES);
+		let totalLines = 0;
+		let lastByte = -1;
+		for (let pos = 0; pos < bytes;) {
+			const count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, bytes - pos), pos);
+			if (!count) break;
+			for (let i = 0; i < count; i++) if (buffer[i] === 10) totalLines++;
+			lastByte = buffer[count - 1];
+			pos += count;
+		}
+		if (lastByte !== -1 && lastByte !== 10) totalLines++;
+		const sample = (start: number, length: number) => {
+			const count = fs.readSync(fd, buffer, 0, length, start);
+			return buffer.subarray(0, count).toString("utf8");
+		};
+		if (bytes <= VERBATIM_BYTES && totalLines <= VERBATIM_LINES)
+			return { text: sample(0, bytes).replace(/\n$/, ""), totalLines, elided: false };
+		const head = sample(0, Math.min(bytes, VERBATIM_BYTES)).split("\n").slice(0, ELIDE_SIDE_LINES).join("\n");
+		const tail = sample(Math.max(0, bytes - VERBATIM_BYTES), Math.min(bytes, VERBATIM_BYTES)).replace(/\n$/, "").split("\n").slice(-ELIDE_SIDE_LINES).join("\n");
+		const omitted = Math.max(0, totalLines - 2 * ELIDE_SIDE_LINES);
+		const marker = `\n... [${omitted} of ${totalLines} lines elided; ${bytes} bytes total; full log: ${logPath}] ...\n`;
+		return { text: boundText(`${head}${marker}${tail}`, VERBATIM_BYTES, marker), totalLines, elided: true };
+	} finally {
+		fs.closeSync(fd);
+	}
 }
 
 function shortenHome(p: string): string {

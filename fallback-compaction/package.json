@@ -1,0 +1,21 @@
+{
+  "name": "@sgai/pi-fallback-compaction",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Triggers native Pi context compaction when estimated context crosses a configurable threshold.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/fallback-compaction.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh fallback-compaction"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

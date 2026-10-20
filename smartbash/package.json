@@ -1,0 +1,23 @@
+{
+  "name": "@sgai/pi-smartbash",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Display-first bash tool override for Pi: named commands, bounded timeouts, pid/poll/kill handoff, full logs.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/smartbash.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh smartbash"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

@@ -66,7 +66,7 @@ JSON output embeds a pre-rendered `yaml` field for tool rendering.
 
 ## Pi extension
 
-`extensions/sgai-evidence.ts` registers the `evidence` tool: parameters
+`src/index.ts` (built to `build/sgai-evidence.js`) registers the `evidence` tool: parameters
 `folder`, `question`, optional `listFiles`, `windows` (2–24, default 12) and
 `concurrency` (2–32, default 12). Results render as fenced YAML; `usage`
 reports local tokens at zero cost. Install the package:

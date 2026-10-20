@@ -122,7 +122,7 @@ def test_cli_enumerates_eligible_files():
     assert proc.returncode == 0, proc.stderr
     result = _json.loads(proc.stdout)
     names = [f["path"].rsplit("/", 1)[-1] for f in result["files"]]
-    assert "fanout.py" in names and "sgai-evidence.ts" in names and "AGENTS.md" in names
+    assert "fanout.py" in names and "index.ts" in names and "AGENTS.md" in names
     assert not any(n.endswith(".env") or n == "package.json" for n in names)  # data/config stays out
     assert all(f["lines"] > 0 for f in result["files"])
     assert result["eligible"] == len(result["files"])

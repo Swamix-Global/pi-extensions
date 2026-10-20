@@ -1,0 +1,25 @@
+{
+  "name": "pi-subagent-pack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SubagentX for Pi as a single-file optimized build, with installer and uninstaller.",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["build/sgai-subagentx.js"]
+  },
+  "scripts": {
+    "build": "bash build.sh"
+  },
+  "dependencies": {
+    "execa": "^10.1.0",
+    "lodash-es": "^4.18.1",
+    "tree-kill": "^1.2.2",
+    "yaml": "^2.9.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

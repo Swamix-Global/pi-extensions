@@ -1,0 +1,22 @@
+{
+  "name": "@sgai/pi-sgai-formatter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Width-aware assistant/tool Markdown formatter for Pi, including boxed YAML and the sgai:format-markdown event.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/sgai-formatter.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh sgai-formatter"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

@@ -1,6 +1,6 @@
 /** Shared defaults for ordinary OpenAI chat requests; no provider/auth replacement. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { hasExtensionSetting, readExtensionSettings, writeExtensionSettings } from "../lib/extension-settings.mjs";
+import { hasExtensionSetting, readExtensionSettings, writeExtensionSettings } from "./extension-settings";
 
 const SERVICE_TIERS = ["priority", "default", "auto", "flex"] as const;
 type ServiceTier = typeof SERVICE_TIERS[number];

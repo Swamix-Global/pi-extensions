@@ -11,7 +11,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi, visibleWidth, Text } from "@earendil-works/pi-tui";
-import { extensionSettingsFilePath, hasExtensionSetting, readExtensionSettings, writeExtensionSettings } from "../lib/extension-settings.mjs";
+import { extensionSettingsFilePath, hasExtensionSetting, readExtensionSettings, writeExtensionSettings } from "./extension-settings";
 
 export const DEFAULT_FORMATTER_SETTINGS = { enabled: true } as const;
 

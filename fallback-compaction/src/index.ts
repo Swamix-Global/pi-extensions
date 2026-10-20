@@ -1,8 +1,8 @@
 /**
  * Native Fallback Compaction Extension for Pi.
  *
- * Monitors session context tokens after each turn and agent run.
- * If the estimated context reaches or exceeds the threshold (default: 100,000 tokens),
+ * Caps tool results during live runs and repairs oversized legacy request context.
+ * If settled context reaches the proactive threshold (default: 50,000 tokens),
  * this automatically triggers Pi's native compaction (`ctx.compact()`), creating
  * a structured CompactionEntry in the session and reclaiming context.
  */
@@ -14,9 +14,10 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { extensionSettingsFilePath, readExtensionSettings, writeExtensionSettings } from "../lib/extension-settings.mjs";
+import { extensionSettingsFilePath, readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
+import { registerContextBudget } from "./context-budget.ts";
 
-export const DEFAULT_FALLBACK_COMPACTION_THRESHOLD = 100_000;
+export const DEFAULT_FALLBACK_COMPACTION_THRESHOLD = 50_000;
 
 export const settingsPath = extensionSettingsFilePath;
 
@@ -144,6 +145,7 @@ export function createCompactionChecker(): CompactionChecker {
 }
 
 export default function (pi: ExtensionAPI) {
+	registerContextBudget(pi, settingsPath);
 	const checker = createCompactionChecker();
 
 	try {

@@ -5,3 +5,5 @@ __pycache__/
 .pi/
 .env
 .env.*
+build/
+subagentx/node_modules
