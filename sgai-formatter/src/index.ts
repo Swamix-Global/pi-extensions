@@ -132,9 +132,14 @@ function yamlValue(value: string): string {
 		out += flowMatch[1];
 		out += yamlSpan(YAML_COLOR.punct, flowMatch[2]);
 		for (const part of flowMatch[3].split(/(,)/)) {
-			const trimmed = part.trim();
-			out += part === "," ? yamlSpan(YAML_COLOR.punct, ",") : part.length ? (trimmed ? yamlScalar(trimmed).replace(trimmed, yamlScalar(part.trim())) : part) : part;
-			if (part === ",") continue;
+			if (part === ",") {
+				out += yamlSpan(YAML_COLOR.punct, ",");
+				continue;
+			}
+			const lead = part.match(/^\s*/)?.[0] ?? "";
+			const core = part.slice(lead.length).replace(/\s+$/, "");
+			const trail = part.slice(lead.length + core.length);
+			out += lead + (core ? yamlScalar(core) : "") + trail;
 		}
 		out += yamlSpan(YAML_COLOR.punct, flowMatch[4]);
 		out += flowMatch[5];
