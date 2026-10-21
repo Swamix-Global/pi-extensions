@@ -48,15 +48,105 @@ const { execa } = await import("execa");
 const treeKill = (await import("tree-kill")).default;
 const { clamp, orderBy, sortBy, uniq } = await import("lodash-es");
 const { parse: parseYaml, stringify: stringifyYaml } = await import("yaml");
-const {
-	FALLBACK_SUBAGENT_MODEL,
-	quotaErrorFromEvent,
-	runQuotaFallback,
-} = (await import(libUrl("subagentx-retry.mjs"))) as {
-	FALLBACK_SUBAGENT_MODEL: string;
-	quotaErrorFromEvent: (event: any) => string;
-	runQuotaFallback: (options: any) => Promise<{ retried: boolean }>;
-};
+/* Provider failure classification and pool failover. Bundled with this package so the
+   repo is the source of truth; a dead leg (quota or transport) hops instead of aborting. */
+const QUOTA_ERROR = /(?:\bquota\b|rate[\s_-]*limit|ratelimit|too many requests|resource[\s_-]+exhausted|insufficient[\s_-]+quota|usage[\s_-]+limit|(?:exceed|exceeded|over)[^\n]{0,40}(?:quota|rate|limit)|(?:quota|rate|limit)[^\n]{0,40}(?:exhaust|deplet|reached)|\b429\b)/i;
+const TRANSPORT_ERROR = /(?:connection\s*(?:error|refused|reset|closed|aborted|failed|timed?\s*out)|econn(?:refused|reset|aborted)|enotfound|eai_again|etimedout|epipe|socket\s+hang\s*up|fetch\s+failed|network\s+error|other\s+side\s+closed|bad\s+gateway|service\s+unavailable|upstream\s+(?:connect|error|timeout)|\b50[234]\b|unable\s+to\s+connect|could\s+not\s+connect|dns|tls\s+handshake|proxy\s+error)/i;
+const DEFAULT_SUBAGENT_MODEL = "openai/gpt-6.1-sol";
+const FALLBACK_SUBAGENT_MODEL = "deepseek/deepseek-flash";
+
+function failureText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (!value || typeof value !== "object") return "";
+	const v = value as Record<string, unknown>;
+	return [v.message, v.errorMessage, v.code, v.type, v.status, v.reason, v.name]
+		.filter((part) => typeof part === "string" || typeof part === "number")
+		.map(String)
+		.join(" ");
+}
+
+/** "quota" | "transport" | "" — why a dead leg should hand off to the next pool model. */
+function classifyFailure(value: unknown): string {
+	const text = failureText(value);
+	if (!text) return "";
+	if (QUOTA_ERROR.test(text)) return "quota";
+	if (TRANSPORT_ERROR.test(text)) return "transport";
+	return "";
+}
+
+/** First classified provider failure carried by a child event, else "". */
+function failureTextFromEvent(event: any): string {
+	if (!event || typeof event !== "object") return "";
+	const values: unknown[] = [];
+	if (event.type === "message_end" && event.message?.role === "assistant") {
+		values.push(event.message.errorMessage, event.message.rawStopReason, event.message.diagnostics);
+	}
+	if (event.assistantMessageEvent) values.push(event.assistantMessageEvent.error, event.assistantMessageEvent.reason);
+	if (event.type === "response" && event.success === false) values.push(event.error);
+	return values.map(failureText).find((text) => text && classifyFailure(text)) ?? "";
+}
+
+function shouldFailover({
+	structuredError = "",
+	stderr = "",
+	exitCode = 0,
+	signal = null,
+	aborted = false,
+	stopReason = "",
+	hops = 0,
+	maxHops = 0,
+}: Record<string, any> = {}): string {
+	if (aborted || signal || exitCode === 130 || exitCode === 143 || stopReason === "aborted") return "";
+	if (stopReason && stopReason !== "error") return "";
+	if (hops >= maxHops) return "";
+	return classifyFailure(structuredError) || classifyFailure(stderr);
+}
+
+function fallbackContinuationPrompt(kind: string): string {
+	if (kind === "transport") {
+		return "The previous provider leg failed with a connection/transport error, not a task error. Continue the original TASK now on this model: reuse any tool work already completed in this session, do not repeat completed tool calls, and finish with the required report.";
+	}
+	return "The previous provider reported quota exhaustion or a rate limit. Continue the original TASK from this current session state; preserve and use completed tool work, do not repeat completed tool calls, and finish the task with the required report.";
+}
+
+/**
+ * Prompt once, then hop across the configured pool while a leg dies from quota or
+ * transport failure. Each hop resumes the same RPC session, so completed work is kept.
+ */
+async function runPoolFallback({
+	sendPrompt,
+	waitForSettled,
+	getAttempt,
+	setFallbackModel,
+	hasFallback = true,
+	maxHops = 1,
+	signal = null,
+}: Record<string, any>): Promise<{ retried: boolean; hops: number }> {
+	let hops = 0;
+	let reason = "quota";
+	const prompt = async (message: string) => {
+		const settled = waitForSettled();
+		const response = await sendPrompt(message);
+		if (response?.success === false) throw Object.assign(new Error(response.error || "Subagent rejected prompt"), { promptRejected: true });
+		await settled;
+	};
+	while (true) {
+		let promptError: any;
+		try { await prompt(hops ? fallbackContinuationPrompt(reason) : "TASK"); } catch (error) { promptError = error; }
+		const attempt = getAttempt();
+		const structuredError = `${attempt.structuredError ?? ""} ${promptError?.message ?? ""}`;
+		reason = shouldFailover({ ...attempt, structuredError, aborted: Boolean(signal?.aborted), hops, maxHops });
+		if (!reason || !hasFallback) {
+			if (promptError) throw promptError;
+			return { retried: hops > 0, hops };
+		}
+		if (attempt.processExited || attempt.processError) {
+			throw new Error(`${promptError?.message ?? "Subagent failed"}; pool failover unavailable because the RPC child exited before its session could be resumed`);
+		}
+		await setFallbackModel(reason);
+		hops += 1;
+	}
+}
 
 export interface SubagentxSettings {
 	enabled: boolean;
@@ -3317,7 +3407,7 @@ export default function (pi: ExtensionAPI) {
 			let legReported: string[] = [];
 			const reportedLabels: string[] = [];
 			let structuredError = "";
-			let attemptQuotaError = "";
+			let attemptFailure = "";
 			let providerStopReason = "";
 
 			const pendingCompressions: Array<Promise<unknown>> = [];
@@ -3468,10 +3558,10 @@ export default function (pi: ExtensionAPI) {
 						commandResponses.delete(event.id);
 						return;
 					}
-					const quotaError = quotaErrorFromEvent(event);
-					if (quotaError) {
-						attemptQuotaError = quotaError;
-						structuredError = quotaError;
+					const failureText = failureTextFromEvent(event);
+					if (failureText) {
+						attemptFailure = failureText;
+						structuredError = failureText;
 					}
 					if (event.type === "message_end" && event.message?.role === "assistant") {
 						providerStopReason = event.message.stopReason || providerStopReason;
@@ -3506,7 +3596,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					if (event.type === "turn_start") {
-						attemptQuotaError = "";
+						attemptFailure = "";
 						structuredError = "";
 						providerStopReason = "";
 						state.turns++;
@@ -3833,30 +3923,32 @@ export default function (pi: ExtensionAPI) {
 			};
 			const completion = (async () => {
 			try {
-				const orchestration = await runQuotaFallback({
+				const pool = getSubagentModels();
+				const orchestration = await runPoolFallback({
 					sendPrompt: sendPromptRpc,
 					waitForSettled,
 					model: currentModel,
 					signal,
 					// The configured pool order is the fallback chain; its tail is terminal.
-					hasFallback: getSubagentModels().some((candidate) => candidate !== currentModel),
+					hasFallback: pool.some((candidate) => candidate !== currentModel),
+					maxHops: Math.max(0, pool.length - 1),
 					getAttempt: () => ({
-						structuredError: providerStopReason === "error" ? (attemptQuotaError || structuredError) : "",
-						stderr: providerStopReason === "error" ? stderr : "",
+						structuredError: providerStopReason && providerStopReason !== "error" ? "" : (attemptFailure || structuredError),
+						stderr: providerStopReason && providerStopReason !== "error" ? "" : stderr,
 						stopReason: providerStopReason,
 						exitCode: processExitResult?.code ?? 0,
 						signal: processExitResult?.signal ?? null,
 						processExited: processClosed,
 						processError: Boolean(processError),
 					}),
-					setFallbackModel: async () => {
+					setFallbackModel: async (kind: string) => {
 						// Walk the configured pool: settings order is the fallback priority chain.
-						const pool = getSubagentModels();
 						const idx = pool.indexOf(currentModel);
 						const next = pool[idx + 1] ?? (pool[0] !== currentModel ? pool[0] : "");
-						if (!next || next === currentModel) throw new Error(`${currentModel} reported quota exhaustion and no fallback remains in the configured pool`);
+						const reason = kind === "transport" ? "failed with a connection/transport error" : "reported quota/rate exhaustion";
+						if (!next || next === currentModel) throw new Error(`${currentModel} ${reason} and no fallback remains in the configured pool`);
 						finishLeg();
-						onUpdate?.({ content: [{ type: "text", text: `SubagentX: ${currentModel} reported quota/rate exhaustion; continuing this session on ${next}.` }], details: { display: { ...state } } });
+						onUpdate?.({ content: [{ type: "text", text: `SubagentX: ${currentModel} ${reason}; continuing this session on ${next}.` }], details: { display: { ...state } } });
 						await selectFallbackModel(requestRpc, next);
 						currentModel = next;
 						runRecord.requestedFallback = next;
@@ -3864,7 +3956,7 @@ export default function (pi: ExtensionAPI) {
 						state.contextWindow = getContextWindow(ctx, currentModel);
 						rawFinalMessage = ""; currentText = ""; currentUsage = zeroUsage(); currentCost = 0;
 						legUsage = zeroUsage(); legCost = 0; legTurns = 0; legRecorded = false; legReported = [];
-						attemptQuotaError = ""; structuredError = ""; providerStopReason = ""; stderr = "";
+						attemptFailure = ""; structuredError = ""; providerStopReason = ""; stderr = "";
 						state.finalMessage = "";
 						pushUpdate(true);
 					},
