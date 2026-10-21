@@ -161,6 +161,39 @@ try {
     const out = hooks.context_with_system({ messages }, ctx);
     for (let i = 0; i < messages.length; i++) assert.equal(out.messages[i], messages[i]);
   });
+  check("already-bounded results are never re-bounded as results accumulate", () => {
+    // Regression: the shared per-result cap shrinks as results accumulate, so the
+    // repair used to shave the same marked results a little smaller every turn,
+    // rewriting early history each turn and re-billing the whole prompt at the
+    // provider (observed: cache reads pinned at the system prompt for 50+ turns).
+    const manager = SessionManager.inMemory(temp);
+    for (let i = 0; i < 12; i++) manager.appendMessage(result(`a${i}`, "x".repeat(65536)));
+    const out1 = hooks.turn_end({ entries: [], context: { contextEntries: manager.buildSessionProjection().entries } }, ctx);
+    const wave1 = out1.entries.filter((entry) => entry.type === "context_edit");
+    assert.ok(wave1.length > 0, "first turn bounds oversized results");
+    for (const edit of wave1) manager.appendContextEdit(edit.targetId, edit.replacement);
+    const boundedIds = new Set(wave1.map((edit) => edit.targetId));
+    // Second wave halves the per-result share; wave-1 results must stay untouched.
+    for (let i = 0; i < 24; i++) manager.appendMessage(result(`b${i}`, "y".repeat(65536)));
+    const out2 = hooks.turn_end({ entries: [], context: { contextEntries: manager.buildSessionProjection().entries } }, ctx);
+    const wave2 = out2.entries.filter((entry) => entry.type === "context_edit");
+    assert.ok(wave2.length > 0, "new oversized results still get bounded");
+    for (const edit of wave2) assert.ok(!boundedIds.has(edit.targetId), `re-bounded ${edit.targetId}`);
+    // Request-time repair must leave marked results byte-identical too.
+    for (const edit of wave2) manager.appendContextEdit(edit.targetId, edit.replacement);
+    const messages = manager.buildSessionProjection().messages;
+    const repaired = hooks.context_with_system({ messages }, ctx);
+    let marked = 0;
+    for (let i = 0; i < repaired.messages.length; i++) {
+      const message = repaired.messages[i];
+      if (message.role === "toolResult" && JSON.stringify(message.content).includes("[context-budget:")) {
+        marked++;
+        assert.equal(message, messages[i], "request repair rewrote a bounded result");
+      }
+    }
+    assert.ok(marked >= wave2.length, "bounded results carry markers");
+    assert.equal(aborts, 0);
+  });
   check("legacy compaction retains giant pair; request repair preserves IDs and system", () => {
     const manager = SessionManager.inMemory(temp);
     manager.appendMessage({ role: "user", content: "inspect risk", timestamp: 1 });

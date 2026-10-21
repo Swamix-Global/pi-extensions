@@ -26,6 +26,24 @@ function marker(file: string) {
   return `\n… [context-budget: output truncated; full result: ${file}. Read bounded ranges; do not reload the whole artifact.] …\n`;
 }
 
+/**
+ * A result carrying a budget marker was bounded at the cap in force then. The
+ * aggregate cap shrinks as results accumulate, so re-running the repair would
+ * shave a little more off the same results every turn/request, rewriting early
+ * history each time — invalidating the provider prefix cache from the first
+ * edit onward and re-billing the whole prompt every turn. Bounded once means
+ * bounded forever: the request guard still protects the context window.
+ */
+function isBounded(content: Content): boolean {
+  return content.some(
+    (block) =>
+      block.type === "text" &&
+      typeof block.text === "string" &&
+      (block.text.includes("[context-budget:") ||
+        block.text.includes("output truncated; original remains in the session transcript")),
+  );
+}
+
 function requestToolBudget(ctx: ExtensionContext) {
   return Math.min(REQUEST_TOOL_OUTPUT_BYTES, Math.floor((ctx.model?.contextWindow ?? 65536) * 1.5));
 }
@@ -82,6 +100,7 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
     const perResult = resultLimit(results.map(({ message }) => message.content), ctx);
     const entries = [...event.entries];
     for (const { id, message } of results) {
+      if (isBounded(message.content)) continue;
       try {
         const content = bounded(message.content, perResult, message, settingsPath());
         if (content !== message.content) entries.push({ type: "context_edit" as const, targetId: id, replacement: { content } });
@@ -98,7 +117,7 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
     const perResult = resultLimit(results.map((message) => message.content), ctx);
     let repaired = 0;
     const messages = event.messages.map((message) => {
-      if (message.role !== "toolResult") return message;
+      if (message.role !== "toolResult" || isBounded(message.content)) return message;
       let content: Content;
       try {
         content = bounded(message.content, perResult, message, settingsPath());
