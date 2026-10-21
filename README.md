@@ -52,8 +52,7 @@ Bundling rules: Node builtins and host packages (`@earendil-works/pi-*`, `typebo
 external; everything inside the package, including the helper modules, is inlined.
 `tool-subagentx` keeps its own `build.sh` because it also inlines third-party dependencies
 (`execa`, `yaml`, `lodash-es`, `tree-kill`) and minifies. `tool-subagentx` still loads a few
-agent-owned runtime libraries (`local-ai.mjs`, `deepseek-ai.mjs`, `subagentx-retry.mjs`,
-`nest-result.mjs`) from `$PI_CODING_AGENT_DIR/lib` — those belong to the agent deployment,
+agent-owned runtime libraries (`local-ai.mjs`, `deepseek-ai.mjs`, `nest-result.mjs`) from `$PI_CODING_AGENT_DIR/lib` — those belong to the agent deployment,
 not this tree.
 
 ## Adding an extension
