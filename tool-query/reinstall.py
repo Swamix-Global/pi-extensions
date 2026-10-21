@@ -46,7 +46,7 @@ def reinstall():
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    print(f"Installed absolute package: {package}\nRun /reload to load the updated query tool.")
+    print(f"Installed absolute package: {package}\nRun /reload to load the updated evidence tool.")
 
 
 if __name__ == "__main__":

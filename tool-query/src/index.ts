@@ -166,5 +166,4 @@ export default function toolQueryExtension(pi: ExtensionAPI) {
   };
 
   pi.registerTool({ name: "evidence", ...toolDefinition });
-  pi.registerTool({ name: "query", ...toolDefinition });
 }

@@ -66,7 +66,7 @@ JSON output embeds a pre-rendered `yaml` field for tool rendering.
 
 ## Pi extension
 
-`src/index.ts` (built to `build/tool-query.js`) registers the `evidence` and `query` tools: parameters
+`src/index.ts` (built to `build/tool-query.js`) registers the `evidence` tool: parameters
 `folder`, `question`, optional `listFiles`, `windows` (2–24, default 12) and
 `concurrency` (2–32, default 12). Results render as fenced YAML, and the renderer asks the
 formatter through the synchronous `sgai:format-markdown` event so the packet is boxed and

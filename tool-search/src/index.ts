@@ -288,9 +288,10 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "web_search",
 		description:
-			"Search the web through a pluggable provider aggregator (deepseek, brave, perplexity, searxng, antigravity). " +
-			"Provider comes from the call, settings, or random with automatic failover. Normalized results: title, url, " +
-			"summary, optional provider score. Billed per successful request on paid providers.",
+			"Search the web through a pluggable provider aggregator (deepseek, brave, perplexity, searxng, antigravity): the " +
+			"provider comes from the call, from settings, or random with automatic failover. Returns normalized results — " +
+			"title, url, summary and an optional provider score (0–3; ≥1.5 is a strong match). DeepSeek accepts " +
+			"site:/lang:/after:/before: operators. Each call aborts after 30s; paid providers bill per successful request.",
 		parameters: searchParameters,
 		annotations: { readOnlyHint: true, openWorldHint: true },
 		async execute(_id, params, signal, _onUpdate, ctx) {
@@ -362,8 +363,9 @@ export default function (pi: ExtensionAPI) {
 		name: "web_fetch",
 		label: "web_fetch",
 		description:
-			"Fetch one web page and return its title and full body converted to Markdown (DeepSeek Fetch API). " +
-			"HTTP/HTTPS URLs only; large pages are elided head+tail. Billed per successful request.",
+			"Fetch one web page and return its title and body converted to Markdown (DeepSeek Fetch API only). HTTP/HTTPS " +
+			"URLs only; output is bounded to about 200 lines / 64 KiB with head+tail elision, so a truncated page needs a " +
+			"narrower URL rather than a retry. Calls abort after 30s; billed per successful request.",
 		parameters: fetchParameters,
 		annotations: { readOnlyHint: true, openWorldHint: true },
 		async execute(_id, params, signal) {

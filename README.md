@@ -25,8 +25,8 @@ its own inlined `src/extension-settings.ts` helper (no shared lib import at runt
 
 | Path | Purpose |
 | --- | --- |
-| `tool-bash/` | Bash override: named commands, timeouts, pid/poll/kill handoff, full logs under `<cwd>/.pi/tool-bash/`, head/tail preview. `/settings:tool-bash` |
-| `tool-python/` | uv-based `python` tool: arbitrary on-the-fly scripts with ephemeral deps, syntax-highlighted call view, per-run `script.py`/`out.log` under `<cwd>/.pi/tool-python/`. `/settings:tool-python` |
+| `tool-bash/` | Bash override: named commands, timeouts, pid/poll/kill handoff, full logs under `<cwd>/.pi/smartbash/`, head/tail preview. `/settings:tool-bash` |
+| `tool-python/` | uv-based `python` tool: arbitrary on-the-fly scripts with ephemeral deps, syntax-highlighted call view, per-run `script.py`/`out.log` under `<cwd>/.pi/smartpython/`. `/settings:tool-python` |
 | `sgai-formatter/` | Width-aware assistant/tool Markdown rendering, including boxed YAML; answers the synchronous `sgai:format-markdown` event for tool-subagentx. |
 | `util-openai/` | Default OpenAI `serviceTier` (priority) applied per request; `/settings:util-openai [priority\|default\|auto\|flex]`. |
 | `util-compaction/` | Triggers native `ctx.compact()` when estimated context crosses the threshold (default 100k); `/settings:util-compaction [on\|off\|<tokens>]`. |

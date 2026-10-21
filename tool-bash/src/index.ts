@@ -259,7 +259,8 @@ export default function (pi: ExtensionAPI) {
 			"completion with the output (huge outputs elided head+tail, full log path included); if still running " +
 			"at the deadline it returns immediately without blocking with the pid and log path — poll later with " +
 			"`tail` on the log or stop with `kill <pid>`. Catastrophic commands (rm -rf /, mkfs, raw-disk dd, fork " +
-			"bombs) are rejected. Each call is logged under <project>/.pi/tool-bash/.",
+			"bombs) are rejected. Each call is logged under <project>/.pi/smartbash/<date>-<slug>/ " +
+			"{cmd.sh,out.log,meta.json}.",
 		parameters: smartBashParameters,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const command = typeof params.command === "string" ? params.command : "";
