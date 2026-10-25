@@ -44,21 +44,22 @@ function isBounded(content: Content): boolean {
   );
 }
 
-function requestToolBudget(ctx: ExtensionContext) {
-  return Math.min(REQUEST_TOOL_OUTPUT_BYTES, Math.floor((ctx.model?.contextWindow ?? 65536) * 1.5));
+/**
+ * Caps are constant per model, never a share of a budget that shrinks as results
+ * accumulate. Any cap derived from live accumulation re-derives differently on every
+ * turn, so a 40 KiB result that fits one turn falls outside the smaller cap later and
+ * gets rewritten deep in history. Each such edit diverges the prompt prefix (re-billing
+ * the whole tail) and invalidates Pi's usage-anchored context estimate, which is what
+ * made the reported context percentage flicker between the measured value and a
+ * char-based fallback. A result is bounded once, at creation or first repair.
+ */
+function perResultCap(ctx: ExtensionContext) {
+  return Math.max(4096, Math.min(TOOL_OUTPUT_BYTES, Math.floor((ctx.model?.contextWindow ?? 65536) / 2)));
 }
 
-/** Leave small results unchanged; only share the aggregate cap among large results. */
-function resultLimit(contents: Content[], ctx: ExtensionContext) {
-  let remaining = requestToolBudget(ctx);
-  let count = contents.length;
-  for (const size of contents.map(textBytes).sort((a, b) => a - b)) {
-    const cap = Math.min(TOOL_OUTPUT_BYTES, Math.floor(remaining / count));
-    if (size > cap) return cap;
-    remaining -= size;
-    count--;
-  }
-  return TOOL_OUTPUT_BYTES;
+/** Two full-size results per request before the burst is sliced smaller. */
+function requestCap(ctx: ExtensionContext) {
+  return Math.min(REQUEST_TOOL_OUTPUT_BYTES, 2 * perResultCap(ctx));
 }
 
 function bounded(content: Content, limit: number, payload: unknown, settingsFile: string): Content {
@@ -66,14 +67,52 @@ function bounded(content: Content, limit: number, payload: unknown, settingsFile
   return boundContent(content, limit, marker(archive(payload, settingsFile)));
 }
 
+/**
+ * Over-window last resort: drop the oldest whole tool blocks instead of shaving
+ * results already in history. Rewriting a deep result diverges the provider prefix
+ * cache and re-bills the whole tail; removing one contiguous old run is a single
+ * prefix cut — the same cost the router pays when it trims — and it keeps the run
+ * alive instead of aborting it. Only blocks carrying tool results are dropped, so
+ * user instructions and the leading system message always survive, and the cut
+ * lands at a low watermark (`DROP_FRACTION`) so the frontier holds for many requests
+ * rather than advancing a little on each one.
+ */
+const DROP_FRACTION = 0.6;
+
+function dropOldestBlocks<T extends { role: string }>(messages: T[], limit: number, weigh: (message: T) => number): T[] {
+  const groups: T[][] = [];
+  for (const message of messages) {
+    const last = groups.at(-1);
+    // A result belongs to the assistant call turn that heads the group; orphan
+    // results (already-compacted history) are individually droppable.
+    if (message.role === "toolResult" && last?.[0]?.role === "assistant") last.push(message);
+    else groups.push([message]);
+  }
+  const total = (list: T[][]) => list.flat().reduce((sum, message) => sum + weigh(message), 0);
+  const kept = [...groups];
+  const target = Math.floor(limit * DROP_FRACTION);
+  for (let index = 1; index < kept.length - 1 && total(kept) > target; ) {
+    if (!kept[index].some((message) => message.role === "toolResult")) { index++; continue; }
+    kept.splice(index, 1);
+  }
+  return kept.flat();
+}
+
 export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => string) {
+  // One request's worth of tool output is spent as the results arrive: a burst of
+  // parallel 64 KiB results must not land 768 KiB in the transcript. Charged at
+  // creation, so the bound is written once, at the tail, and never revisited.
+  let spent = 0;
+  const MIN_SLICE = 8 * 1024;
+
   // Nested results belong to code, not the model. Preserve their schemas so scripts
   // can filter full data; the enclosing model-visible tool result is capped instead.
   pi.on("tool_result", (event, ctx) => {
     if (event.parentToolCallId) return;
     const content = event.content;
     const structuredBytes = event.structuredContent === undefined ? 0 : Buffer.byteLength(JSON.stringify(event.structuredContent));
-    const limit = Math.min(TOOL_OUTPUT_BYTES, requestToolBudget(ctx));
+    const limit = Math.min(perResultCap(ctx), Math.max(MIN_SLICE, requestCap(ctx) - spent));
+    spent += Math.min(textBytes(content), limit);
     if (textBytes(content) <= limit && structuredBytes <= limit) return;
     try {
       const file = archive({ content, structuredContent: event.structuredContent }, settingsPath());
@@ -91,13 +130,14 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
     }
   });
 
-  // Persist aggregate limits without aborting the live run or deleting raw history.
+  // Persist limits on results that are still over the constant per-result cap.
   pi.on("turn_end", (event, ctx) => {
+    spent = 0;
     const results = event.context.contextEntries.flatMap((entry) => entry.messages
       .filter((message) => message.role === "toolResult")
       .map((message) => ({ id: entry.sourceEntry.id, message })));
     if (!results.length) return;
-    const perResult = resultLimit(results.map(({ message }) => message.content), ctx);
+    const perResult = perResultCap(ctx);
     const entries = [...event.entries];
     for (const { id, message } of results) {
       if (isBounded(message.content)) continue;
@@ -113,8 +153,9 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
 
   // Repair old/resumed sessions too. Preserve system state and every call/result ID.
   pi.on("context_with_system", (event, ctx) => {
+    spent = 0;
     const results = event.messages.filter((message) => message.role === "toolResult");
-    const perResult = resultLimit(results.map((message) => message.content), ctx);
+    const perResult = perResultCap(ctx);
     let repaired = 0;
     const messages = event.messages.map((message) => {
       if (message.role !== "toolResult" || isBounded(message.content)) return message;
@@ -130,17 +171,22 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
       return { ...message, content };
     });
     if (repaired) ctx.ui.notify(`Context safety: bounded ${repaired} oversized tool result(s); full output preserved.`, "warning");
-    // Estimates are not tokenizer guarantees. Stop oversized non-tool input instead
-    // of silently dropping user instructions or invoking a live-run compaction.
+    // Estimates are not tokenizer guarantees. Fit the window by dropping old tool
+    // blocks whole; stop the request only if user/tool-free input still cannot fit,
+    // rather than silently dropping user instructions or invoking live compaction.
     const window = ctx.model?.contextWindow;
-    if (window) {
-      const estimate = messages.reduce((sum, message) => sum + Math.ceil(estimateTokens(message) * 1.5) + 64, 0);
-      const reserve = Math.min(16384, Math.floor(window / 4));
-      if (estimate > window - reserve) {
-        ctx.ui.notify(`Context safety stopped this request: estimated ${estimate} tokens, safe input budget ${window - reserve}. Run /compact, split large input, or select a larger-context model; retry alone will not help.`, "error");
-        ctx.abort();
-      }
+    if (!window) return { messages };
+    const weigh = (message: (typeof messages)[number]) => Math.ceil(estimateTokens(message) * 1.5) + 64;
+    const reserve = Math.min(16384, Math.floor(window / 4));
+    const fitted = dropOldestBlocks(messages, window - reserve, weigh);
+    const estimate = fitted.reduce((sum, message) => sum + weigh(message), 0);
+    if (estimate > window - reserve) {
+      ctx.ui.notify(`Context safety stopped this request: estimated ${estimate} tokens, safe input budget ${window - reserve}. Run /compact, split large input, or select a larger-context model; retry alone will not help.`, "error");
+      ctx.abort();
+      return { messages: fitted };
     }
-    return { messages };
+    const dropped = messages.length - fitted.length;
+    if (dropped) ctx.ui.notify(`Context safety: dropped ${dropped} oldest tool message(s) to fit; full transcript preserved.`, "warning");
+    return { messages: fitted };
   });
 }

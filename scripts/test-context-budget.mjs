@@ -143,16 +143,25 @@ try {
       assert.deepEqual(out.details.contextBudgetOriginal.content, content);
     } finally { process.env.PI_EXTENSION_SETTINGS_PATH = saved; }
   });
-  check("aggregate parallel outputs persist as context edits, not aborted runs", () => {
+  check("parallel outputs share one request budget at creation, never as history rewrites", () => {
     const manager = SessionManager.inMemory(temp);
-    for (let i = 0; i < 12; i++) manager.appendMessage(result(`t${i}`, "x".repeat(65536)));
-    const projection = manager.buildSessionProjection();
-    const earlier = { type: "custom", customType: "earlier-handler", data: { keep: true } };
-    const out = hooks.turn_end({ entries: [earlier], context: { contextEntries: projection.entries } }, ctx);
-    assert.equal(out.entries[0], earlier);
-    assert.equal(out.entries.length, 13);
-    for (const edit of out.entries.filter((entry) => entry.type === "context_edit")) manager.appendContextEdit(edit.targetId, edit.replacement);
-    assert.ok(manager.buildSessionProjection().messages.reduce((n, m) => n + budget.textBytes(m.content), 0) <= budget.REQUEST_TOOL_OUTPUT_BYTES);
+    hooks.turn_end({ entries: [], context: { contextEntries: [] } }, ctx);
+    const produced = [];
+    for (let i = 0; i < 12; i++) {
+      const out = hooks.tool_result({ content: text("x".repeat(65536)) }, ctx);
+      produced.push(out);
+      manager.appendMessage(result(`t${i}`, out?.content?.[0]?.text ?? "x".repeat(65536)));
+    }
+    // A burst spends one request budget as it arrives: the head keeps the full
+    // per-result cap, the tail is bounded with an archive pointer.
+    assert.equal(produced[0], undefined);
+    assert.ok(produced.slice(2).every((out) => budget.textBytes(out.content) <= budget.TOOL_OUTPUT_BYTES));
+    assert.ok(produced.at(-1).content.some((block) => block.text.includes("full result:")));
+    const messages = manager.buildSessionProjection().messages;
+    assert.ok(messages.reduce((n, m) => n + budget.textBytes(m.content), 0) <= 2 * budget.REQUEST_TOOL_OUTPUT_BYTES);
+    // History repair never re-shaves results that already fit the constant cap.
+    const out = hooks.turn_end({ entries: [], context: { contextEntries: manager.buildSessionProjection().entries } }, ctx);
+    assert.equal((out?.entries ?? []).filter((entry) => entry.type === "context_edit").length, 0);
     assert.equal(aborts, 0);
     assert.equal(compactions, 0);
   });
@@ -167,31 +176,35 @@ try {
     // rewriting early history each turn and re-billing the whole prompt at the
     // provider (observed: cache reads pinned at the system prompt for 50+ turns).
     const manager = SessionManager.inMemory(temp);
-    for (let i = 0; i < 12; i++) manager.appendMessage(result(`a${i}`, "x".repeat(65536)));
+    for (let i = 0; i < 12; i++) manager.appendMessage(result(`a${i}`, "x".repeat(100000)));
     const out1 = hooks.turn_end({ entries: [], context: { contextEntries: manager.buildSessionProjection().entries } }, ctx);
     const wave1 = out1.entries.filter((entry) => entry.type === "context_edit");
-    assert.ok(wave1.length > 0, "first turn bounds oversized results");
+    assert.equal(wave1.length, 12, "first turn bounds oversized results");
     for (const edit of wave1) manager.appendContextEdit(edit.targetId, edit.replacement);
     const boundedIds = new Set(wave1.map((edit) => edit.targetId));
-    // Second wave halves the per-result share; wave-1 results must stay untouched.
-    for (let i = 0; i < 24; i++) manager.appendMessage(result(`b${i}`, "y".repeat(65536)));
+    // A new wave is bounded too, but every wave-1 result must stay untouched.
+    for (let i = 0; i < 24; i++) manager.appendMessage(result(`b${i}`, "y".repeat(100000)));
     const out2 = hooks.turn_end({ entries: [], context: { contextEntries: manager.buildSessionProjection().entries } }, ctx);
     const wave2 = out2.entries.filter((entry) => entry.type === "context_edit");
     assert.ok(wave2.length > 0, "new oversized results still get bounded");
     for (const edit of wave2) assert.ok(!boundedIds.has(edit.targetId), `re-bounded ${edit.targetId}`);
-    // Request-time repair must leave marked results byte-identical too.
+    // Request-time repair must leave marked results byte-identical too (whole
+    // blocks may be dropped to fit the window, but never rewritten).
     for (const edit of wave2) manager.appendContextEdit(edit.targetId, edit.replacement);
     const messages = manager.buildSessionProjection().messages;
     const repaired = hooks.context_with_system({ messages }, ctx);
+    const kept = new Map(repaired.messages.map((message) => [message.toolCallId, message]));
     let marked = 0;
-    for (let i = 0; i < repaired.messages.length; i++) {
-      const message = repaired.messages[i];
-      if (message.role === "toolResult" && JSON.stringify(message.content).includes("[context-budget:")) {
-        marked++;
-        assert.equal(message, messages[i], "request repair rewrote a bounded result");
-      }
+    let dropped = 0;
+    for (const message of messages) {
+      if (message.role !== "toolResult" || !JSON.stringify(message.content).includes("[context-budget:")) continue;
+      marked++;
+      const survivor = kept.get(message.toolCallId);
+      if (survivor) assert.equal(survivor, message, "request repair rewrote a bounded result");
+      else dropped++;
     }
     assert.ok(marked >= wave2.length, "bounded results carry markers");
+    assert.ok(dropped > 0 && kept.size > 0, "over-window history is cut whole, never shaved");
     assert.equal(aborts, 0);
   });
   check("legacy compaction retains giant pair; request repair preserves IDs and system", () => {
