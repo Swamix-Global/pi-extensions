@@ -8,7 +8,6 @@
     "tool-bash",
     "tool-python",
     "sgai-formatter",
-    "util-openai",
     "util-compaction",
     "tool-search",
     "tool-query",
