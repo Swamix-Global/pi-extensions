@@ -197,7 +197,6 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
       repaired++;
       return { ...message, content };
     });
-    if (repaired) ctx.ui.notify(`Context safety: bounded ${repaired} oversized tool result(s); full output preserved.`, "warning");
     // Estimates are not tokenizer guarantees. Fit the window by dropping old tool
     // blocks whole; stop the request only if user/tool-free input still cannot fit,
     // rather than silently dropping user instructions or invoking live compaction.
@@ -220,10 +219,7 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
     if (estimate > window - reserve) {
       ctx.ui.notify(`Context safety stopped this request: estimated ${estimate} tokens, safe input budget ${window - reserve}. Run /compact, split large input, or select a larger-context model; retry alone will not help.`, "error");
       ctx.abort();
-      return { messages: fitted };
     }
-    const dropped = messages.length - fitted.length;
-    if (droppedIds.size > before) ctx.ui.notify(`Context safety: advanced tool frontier (${dropped} message(s) omitted); full transcript preserved.`, "warning");
     return { messages: fitted };
   });
 }
