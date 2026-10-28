@@ -16,7 +16,10 @@ import * as path from "node:path";
 import { boundText, TOOL_OUTPUT_BYTES } from "./output-budget.ts";
 import { clampWait, type LanguageAdapter } from "./languages.ts";
 
-const POLL_MS = 500;
+const POLL_MS = 100;
+/** Fire the timeout handoff slightly before the host enforces the declared
+ *  timeout, so the wrapper always returns the rich pid/kill/poll result. */
+const TIMEOUT_LEAD_MS = 400;
 const UI_INTERVAL_MS = 1000;
 const PREVIEW_BYTES = 4096;
 const KEEP_LINES = 5;
@@ -284,7 +287,7 @@ export async function runScript(
 	try {
 		let lastUi = 0;
 		while (exit === undefined && spawnError === undefined && !aborted) {
-			if (Date.now() - started >= waitS * 1000) {
+			if (Date.now() - started >= Math.max(200, waitS * 1000 - TIMEOUT_LEAD_MS)) {
 				const preview = pollLog();
 				const elapsedS = Number(((Date.now() - started) / 1000).toFixed(1));
 				writeMeta({ status: "timeout", pid, log: logPath, elapsedS });
