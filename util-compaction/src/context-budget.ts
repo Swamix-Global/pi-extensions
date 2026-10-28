@@ -67,11 +67,19 @@ function bounded(content: Content, limit: number, payload: unknown, settingsFile
   return boundContent(content, limit, marker(archive(payload, settingsFile)));
 }
 
+function routed(ctx: ExtensionContext): boolean {
+  if (ctx.model?.api !== "openai-completions") return false;
+  try {
+    const url = new URL(ctx.model.baseUrl);
+    return ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && url.port === "4141" && url.pathname.startsWith("/r/");
+  } catch { return false; }
+}
+
 /**
  * Over-window last resort: drop the oldest whole tool blocks instead of shaving
  * results already in history. Rewriting a deep result diverges the provider prefix
- * cache and re-bills the whole tail; removing one contiguous old run is a single
- * prefix cut — the same cost the router pays when it trims — and it keeps the run
+ * cache and re-bills the whole tail; advancing a pinned removal set only on real
+ * overflow amortizes that cost across requests and keeps the run
  * alive instead of aborting it. Only blocks carrying tool results are dropped, so
  * user instructions and the leading system message always survive, and the cut
  * lands at a low watermark (`DROP_FRACTION`) so the frontier holds for many requests
@@ -79,9 +87,14 @@ function bounded(content: Content, limit: number, payload: unknown, settingsFile
  */
 const DROP_FRACTION = 0.6;
 
-function dropOldestBlocks<T extends { role: string }>(messages: T[], limit: number, weigh: (message: T) => number): T[] {
+function dropOldestBlocks<T extends { role: string; content?: unknown; toolCallId?: string }>(messages: T[], limit: number, weigh: (message: T) => number, droppedIds: Set<string>): T[] {
+  const callIds = (message: T): string[] => message.role === "assistant" && Array.isArray(message.content)
+    ? message.content.filter((block) => block.type === "toolCall").map((block) => block.id) : [];
+  const visible = messages.filter((message) => !(message.role === "toolResult" && droppedIds.has(message.toolCallId ?? "")) && !callIds(message).some((id) => droppedIds.has(id)));
+  // The low watermark is a destination after overflow, NOT the trigger.
+  if (visible.reduce((sum, message) => sum + weigh(message), 0) <= limit) return visible;
   const groups: T[][] = [];
-  for (const message of messages) {
+  for (const message of visible) {
     const last = groups.at(-1);
     // A result belongs to the assistant call turn that heads the group; orphan
     // results (already-compacted history) are individually droppable.
@@ -92,7 +105,10 @@ function dropOldestBlocks<T extends { role: string }>(messages: T[], limit: numb
   const kept = [...groups];
   const target = Math.floor(limit * DROP_FRACTION);
   for (let index = 1; index < kept.length - 1 && total(kept) > target; ) {
-    if (!kept[index].some((message) => message.role === "toolResult")) { index++; continue; }
+    const ids = callIds(kept[index][0]);
+    const answered = new Set(kept[index].filter((message) => message.role === "toolResult").map((message) => message.toolCallId));
+    if (!ids.length || !ids.every((id) => answered.has(id))) { index++; continue; }
+    for (const id of ids) droppedIds.add(id);
     kept.splice(index, 1);
   }
   return kept.flat();
@@ -104,6 +120,18 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
   // creation, so the bound is written once, at the tail, and never revisited.
   let spent = 0;
   const MIN_SLICE = 8 * 1024;
+
+  pi.on("before_provider_headers", (event, ctx) => {
+    if (!routed(ctx)) return;
+    event.headers["x-pi-ctx-session"] = ctx.sessionManager.getSessionId();
+    event.headers["x-pi-ctx-window"] = String(ctx.model!.contextWindow);
+    event.headers["x-pi-ctx-reserve"] = String(Math.min(16384, Math.floor(ctx.model!.contextWindow / 4)));
+  });
+
+  pi.registerCommand("context-reload", {
+    description: "Reload deployed extensions and context instructions (also available via RPC)",
+    handler: async (_args, ctx) => { await ctx.reload(); },
+  });
 
   // Nested results belong to code, not the model. Preserve their schemas so scripts
   // can filter full data; the enclosing model-visible tool result is capped instead.
@@ -154,7 +182,6 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
   // Repair old/resumed sessions too. Preserve system state and every call/result ID.
   pi.on("context_with_system", (event, ctx) => {
     spent = 0;
-    const results = event.messages.filter((message) => message.role === "toolResult");
     const perResult = perResultCap(ctx);
     let repaired = 0;
     const messages = event.messages.map((message) => {
@@ -175,10 +202,20 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
     // blocks whole; stop the request only if user/tool-free input still cannot fit,
     // rather than silently dropping user instructions or invoking live compaction.
     const window = ctx.model?.contextWindow;
-    if (!window) return { messages };
+    // One aggregate owner: the router receives the real model limit and session ID.
+    // Per-result creation/legacy repair above still protects every transport.
+    if (!window || routed(ctx)) return { messages };
     const weigh = (message: (typeof messages)[number]) => Math.ceil(estimateTokens(message) * 1.5) + 64;
     const reserve = Math.min(16384, Math.floor(window / 4));
-    const fitted = dropOldestBlocks(messages, window - reserve, weigh);
+    const root = messages.find((message) => message.role === "user");
+    const key = createHash("sha256").update(JSON.stringify([ctx.model?.provider, ctx.model?.id, window, root])).digest("hex");
+    const saved = ctx.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === "context-budget-frontier")
+      .map((entry) => entry.type === "custom" ? entry.data as { key?: string; droppedCallIds?: string[] } : undefined)
+      .findLast((data) => data?.key === key);
+    const droppedIds = new Set(saved?.droppedCallIds ?? []);
+    const before = droppedIds.size;
+    const fitted = dropOldestBlocks(messages, window - reserve, weigh, droppedIds);
+    if (droppedIds.size > before) pi.appendEntry("context-budget-frontier", { key, droppedCallIds: [...droppedIds] });
     const estimate = fitted.reduce((sum, message) => sum + weigh(message), 0);
     if (estimate > window - reserve) {
       ctx.ui.notify(`Context safety stopped this request: estimated ${estimate} tokens, safe input budget ${window - reserve}. Run /compact, split large input, or select a larger-context model; retry alone will not help.`, "error");
@@ -186,7 +223,7 @@ export function registerContextBudget(pi: ExtensionAPI, settingsPath: () => stri
       return { messages: fitted };
     }
     const dropped = messages.length - fitted.length;
-    if (dropped) ctx.ui.notify(`Context safety: dropped ${dropped} oldest tool message(s) to fit; full transcript preserved.`, "warning");
+    if (droppedIds.size > before) ctx.ui.notify(`Context safety: advanced tool frontier (${dropped} message(s) omitted); full transcript preserved.`, "warning");
     return { messages: fitted };
   });
 }

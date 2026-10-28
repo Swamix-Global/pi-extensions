@@ -2,9 +2,10 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 # Build every bundle the regression suites read, so a commit can never carry a stale build.
-bash scripts/build-extension.sh tool-bash
+bash scripts/build-extension.sh tool-scripting
 bash scripts/build-extension.sh util-compaction
 bash scripts/build-extension.sh sgai-formatter
 bash scripts/build-extension.sh tool-query
-node scripts/test-context-budget.mjs
+# Context/cache validation is manual: actual Pi RPC turns and provider/router telemetry.
+# See util-compaction/AGENTS.md; do not reintroduce unit tests for this subsystem.
 node --test tests/test-formatter-yaml.mjs

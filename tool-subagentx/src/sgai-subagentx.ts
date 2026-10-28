@@ -52,7 +52,6 @@ const { parse: parseYaml, stringify: stringifyYaml } = await import("yaml");
    repo is the source of truth; a dead leg (quota or transport) hops instead of aborting. */
 const QUOTA_ERROR = /(?:\bquota\b|rate[\s_-]*limit|ratelimit|too many requests|resource[\s_-]+exhausted|insufficient[\s_-]+quota|usage[\s_-]+limit|(?:exceed|exceeded|over)[^\n]{0,40}(?:quota|rate|limit)|(?:quota|rate|limit)[^\n]{0,40}(?:exhaust|deplet|reached)|\b429\b)/i;
 const TRANSPORT_ERROR = /(?:connection\s*(?:error|refused|reset|closed|aborted|failed|timed?\s*out)|econn(?:refused|reset|aborted)|enotfound|eai_again|etimedout|epipe|socket\s+hang\s*up|fetch\s+failed|network\s+error|other\s+side\s+closed|bad\s+gateway|service\s+unavailable|upstream\s+(?:connect|error|timeout)|\b50[234]\b|unable\s+to\s+connect|could\s+not\s+connect|dns|tls\s+handshake|proxy\s+error)/i;
-const DEFAULT_SUBAGENT_MODEL = "openai/gpt-6.1-sol";
 const FALLBACK_SUBAGENT_MODEL = "deepseek/deepseek-flash";
 
 function failureText(value: unknown): string {
@@ -163,9 +162,11 @@ export const settingsPath = extensionSettings.extensionSettingsFilePath;
 
 // Shared by the execution pool and exported defaults. Order is priority: first entry
 // spawns, quota exhaustion walks the list, the paid last entry is reached only last.
+// Runtime pool always comes from settings.json:extensionSettings.subagentx.subagentModels
+// (editable via /settings:subagentx); these defaults apply only while that key is unset.
 const DEFAULT_SUBAGENT_MODELS = [
-	"openai/gpt-6.1-sol",
-	"openrouter/~z-ai/glm-flash-latest",
+	"openai/gpt-6.1-terra",
+	"openrouter/z-ai/glm-5.3-flash",
 	"deepseek/deepseek-flash", // paid via API: last resort, never in the rotation head
 ];
 
@@ -214,10 +215,12 @@ export function writeSettings(patch: Partial<SubagentxSettings>): SubagentxSetti
 
 const SESSION_DIR = path.join(os.homedir(), ".pi", "agent", "subagentx-sessions");
 const MAX_ACTIVE = 10;
-// Exact launch profiles: Sol runs high, GLM Flash Latest runs low, DeepSeek Flash (paid last
+// Exact launch profiles: Terra runs medium, GLM 5.3 Flash runs low, DeepSeek Flash (paid last
 // resort) runs max; every other model retains low. The retired settings key cannot override this.
 const SUBAGENT_REASONING = new Map<string, string>([
 	["openai/gpt-6.1-sol", "high"],
+	["openai/gpt-6.1-terra", "medium"],
+	["openrouter/z-ai/glm-5.3-flash", "low"],
 	["openrouter/~z-ai/glm-flash-latest", "low"],
 	["deepseek/deepseek-flash", "max"],
 ]);
@@ -2867,7 +2870,7 @@ function settingsMenuItems(cfg: SubagentxSettings, probe: LocalProbeState): Sele
 			: probe.models.length > 0 ? `${probe.models.length} detected on ${PROBE_PORTS}` : `none detected on ${PROBE_PORTS}`;
 	return [
 		{ value: "enabled", label: "Extension", description: `${settingSource("enabled")} ${cfg.enabled ? "enabled" : "disabled"}` },
-		{ value: "models", label: "Subagent models", description: `${settingSource("subagentModels")} ${cfg.subagentModels.join(" → ")} · random per spawn` },
+		{ value: "models", label: "Subagent models", description: `${settingSource("subagentModels")} ${cfg.subagentModels.join(" → ")} · order = priority · select to manage` },
 		{ value: "local", label: "Local model", description: `${settingSource("localModel")} ${cfg.localModel} · ${probeText}` },
 		{ value: "url", label: "Local backend URL", description: `${settingSource("localBackendUrl")} ${cfg.localBackendUrl} · OpenAI-compatible /v1` },
 		{ value: "suffix", label: "Compression prompt suffix", description: `${settingSource("compressionSuffix")} ${cfg.compressionSuffix || "(none) · appended to every summary prompt"}` },
@@ -2938,6 +2941,123 @@ async function pickConfiguredLocalModel(ctx: ExtensionCommandContext, probe: Loc
 	return probe.models.find((e) => `${e.source}::${e.id}` === picked) ?? null;
 }
 
+/** Persist a new pool (order = priority); refuses to empty it and flags unresolvable refs. */
+function writeModelPool(ctx: ExtensionCommandContext, pool: string[], check: string[] = []): void {
+	if (!pool.length) {
+		ctx.ui.notify("SubagentX: the pool needs at least one model ref", "warning");
+		return;
+	}
+	writeSettings({ subagentModels: pool });
+	const dropped = check.filter((ref) => !resolvesModel(ctx, ref));
+	ctx.ui.notify(`SubagentX: [u] pool → ${pool.join(" → ")}${dropped.length ? ` · unresolvable: ${dropped.join(", ")}` : ""}`, dropped.length ? "warning" : "info");
+}
+
+/** Every pi-registry model as one picker entry: "provider/id" with display-name context. */
+function registryModelItems(ctx: ExtensionCommandContext): SelectItem[] {
+	try {
+		const registry = (ctx as any)?.modelRegistry;
+		const models: any[] = typeof registry?.getAll === "function" ? registry.getAll() : [];
+		return models
+			.filter((m) => m && m.provider && m.id)
+			.map((m) => ({
+				value: `${m.provider}/${m.id}`,
+				label: `${m.provider}/${m.id}`,
+				description: typeof m.name === "string" && m.name && m.name !== m.id ? m.name : undefined,
+			}));
+	} catch {
+		return [];
+	}
+}
+
+/** Searchable add-model picker: type-to-filter over the registry, manual ref as fallback. */
+async function pickModelRef(ctx: ExtensionCommandContext): Promise<string | null> {
+	const items: SelectItem[] = [
+		{ value: "::manual", label: "✎ Type a model ref…", description: "provider/model-id — for a model not listed below" },
+		...registryModelItems(ctx),
+	];
+	const picked = await showSearchablePicker(ctx, "Add model to pool — type to filter", items);
+	if (!picked) return null;
+	if (picked === "::manual") {
+		const typed = await ctx.ui.input("Model ref (provider/model-id):", "");
+		return typeof typed === "string" && typed.trim() ? typed.trim() : null;
+	}
+	return picked;
+}
+
+/** Interactive pool manager: remove, reorder, add, or bulk-replace pool entries. */
+async function manageModelPool(ctx: ExtensionCommandContext): Promise<void> {
+	while (true) {
+		const pool = readSettings().subagentModels;
+		const items: SelectItem[] = pool.map((ref, index) => ({
+			value: `entry:${index}`,
+			label: `${index + 1}. ${ref}`,
+			description: index === 0 ? "first spawn target · remove or reorder" : "remove or reorder",
+		}));
+		items.push(
+			{ value: "add", label: "+ Add model…", description: "search the model registry · appended to the pool" },
+			{ value: "replace", label: "✎ Replace all…", description: "comma-separated refs · order = priority" },
+		);
+		const picked = await showSearchablePicker(ctx, "Subagent model pool — order is priority", items);
+		if (!picked) return;
+		if (picked === "add") {
+			const ref = await pickModelRef(ctx);
+			if (ref && !pool.includes(ref)) writeModelPool(ctx, [...pool, ref], [ref]);
+		} else if (picked === "replace") {
+			const typed = await ctx.ui.input("Subagent models (comma-separated, order = priority):", pool.join(", "));
+			if (typeof typed === "string") {
+				const refs = [...new Set(typed.split(",").map((ref) => ref.trim()).filter(Boolean))];
+				if (refs.length) writeModelPool(ctx, refs, refs);
+			}
+		} else if (picked.startsWith("entry:")) {
+			const index = Number(picked.slice("entry:".length));
+			const ref = pool[index] ?? "";
+			const entryPick = await showSearchablePicker(ctx, ref, [
+				{ value: "remove", label: "✕ Remove from pool", description: ref },
+				{ value: "up", label: "↑ Move up", description: "higher priority" },
+				{ value: "down", label: "↓ Move down", description: "lower priority" },
+			]);
+			if (entryPick === "remove") {
+				if (pool.length <= 1) ctx.ui.notify("SubagentX: cannot remove the last pool entry", "warning");
+				else writeModelPool(ctx, pool.filter((_, i) => i !== index));
+			} else if (entryPick === "up" && index > 0) {
+				const next = [...pool];
+				[next[index - 1], next[index]] = [next[index], next[index - 1]];
+				writeModelPool(ctx, next);
+			} else if (entryPick === "down" && index < pool.length - 1) {
+				const next = [...pool];
+				[next[index + 1], next[index]] = [next[index], next[index + 1]];
+				writeModelPool(ctx, next);
+			}
+		}
+	}
+}
+
+/** Headless pool edits: /settings:subagentx show | add <ref> | remove <ref|#> | set a,b,c */
+function handlePoolArgs(args: string, ctx: ExtensionCommandContext): void {
+	const [verb, ...rest] = args.split(/\s+/);
+	const pool = readSettings().subagentModels;
+	const ref = rest.join(" ");
+	if (!verb || verb === "show" || !ref) {
+		ctx.ui.notify(`SubagentX pool (${settingSource("subagentModels")}): ${pool.join(" → ")}`, "info");
+		return;
+	}
+	if (verb === "add") {
+		if (pool.includes(ref)) ctx.ui.notify(`SubagentX: ${ref} is already in the pool`, "warning");
+		else writeModelPool(ctx, [...pool, ref], [ref]);
+	} else if (verb === "remove") {
+		const index = /^\d+$/.test(ref) ? Number(ref) - 1 : pool.indexOf(ref);
+		if (index < 0 || index >= pool.length) ctx.ui.notify(`SubagentX: ${ref} is not in the pool`, "warning");
+		else if (pool.length <= 1) ctx.ui.notify("SubagentX: cannot remove the last pool entry", "warning");
+		else writeModelPool(ctx, pool.filter((_, i) => i !== index));
+	} else if (verb === "set") {
+		const refs = [...new Set(ref.split(",").map((item) => item.trim()).filter(Boolean))];
+		if (refs.length) writeModelPool(ctx, refs, refs);
+		else ctx.ui.notify("SubagentX: the pool needs at least one model ref", "warning");
+	} else {
+		ctx.ui.notify("SubagentX: usage /settings:subagentx [show | add <ref> | remove <ref|#> | set <a,b,c>]", "warning");
+	}
+}
+
 async function showSubagentSettings(ctx: ExtensionCommandContext): Promise<void> {
 	const probe: LocalProbeState = { status: "idle", models: [] };
 	while (true) {
@@ -2949,17 +3069,7 @@ async function showSubagentSettings(ctx: ExtensionCommandContext): Promise<void>
 			writeSettings({ enabled });
 			ctx.ui.notify(`SubagentX: [u] ${enabled ? "enabled" : "disabled"}`, "info");
 		} else if (action === "models") {
-			const typed = await ctx.ui.input("Subagent models (comma-separated, random per spawn):", cfg.subagentModels.join(", "));
-			if (typeof typed === "string") {
-				const refs = typed.split(",").map((ref) => ref.trim()).filter(Boolean);
-				const known = refs.filter((ref) => resolvesModel(ctx, ref));
-				const pool = known.length ? known : refs;
-				if (pool.length) {
-					writeSettings({ subagentModels: pool });
-					const dropped = refs.filter((ref) => !known.includes(ref));
-					ctx.ui.notify(`SubagentX: [u] pool → ${pool.join(" → ")}${dropped.length ? ` · unresolvable: ${dropped.join(", ")}` : ""}`, dropped.length ? "warning" : "info");
-				} else ctx.ui.notify("SubagentX: the pool needs at least one model ref", "warning");
-			}
+			await manageModelPool(ctx);
 		} else if (action === "local") {
 			const picked = await pickConfiguredLocalModel(ctx, probe);
 			if (picked === "manual") {
@@ -2984,7 +3094,11 @@ async function showSubagentSettings(ctx: ExtensionCommandContext): Promise<void>
 }
 
 function registerSubagentSettings(pi: ExtensionAPI): void {
-	const handler = async (_args: string, ctx: ExtensionCommandContext) => {
+	const handler = async (args: string, ctx: ExtensionCommandContext) => {
+		if (args.trim()) {
+			handlePoolArgs(args.trim(), ctx);
+			return;
+		}
 		if (ctx.hasUI && ctx.mode === "tui") {
 			await showSubagentSettings(ctx);
 			return;
@@ -2996,12 +3110,8 @@ function registerSubagentSettings(pi: ExtensionAPI): void {
 		);
 	};
 	try {
-		pi.registerCommand?.("settings:tool-subagentx", {
-			description: "[u] (settings.json:extensionSettings.subagentx) tool-subagentx settings — ordered model pool, local compressor, compression prompt suffix",
-			handler,
-		});
 		pi.registerCommand?.("settings:subagentx", {
-			description: "[u] (alias for /settings:tool-subagentx) — /settings:subagentx",
+			description: "[u] (settings.json:extensionSettings.subagentx) SubagentX settings — model pool add/remove/reorder, local compressor, compression suffix · /settings:subagentx [show|add <ref>|remove <ref|#>|set a,b,c]",
 			handler,
 		});
 	} catch {}

@@ -1,0 +1,24 @@
+{
+  "name": "@sgai/pi-tool-scripting",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "tool-scripting: unified script executor for Pi. Language adapters (bash, python) share one runner: named runs, wait-budget progress bar, boxed code/output views, pid/poll/kill handoff, full logs.",
+  "keywords": [
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "build/tool-scripting.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../scripts/build-extension.sh tool-scripting"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

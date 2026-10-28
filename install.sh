@@ -5,7 +5,7 @@ set -euo pipefail
 
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-packages=(tool-bash tool-python sgai-formatter util-compaction tool-search)
+packages=(tool-scripting sgai-formatter util-compaction tool-search)
 
 bash "$source_dir/scripts/build-all.sh"
 
@@ -13,7 +13,8 @@ install -d "$agent_dir/extensions"
 rm -f "$agent_dir/lib/extension-settings.mjs"   # settings helper is inlined into every bundle
 
 # Clean up retired pre-migration folders so pi does not load obsolete duplicates.
-rm -rf "$agent_dir/extensions/smartbash" "$agent_dir/extensions/smartpython" "$agent_dir/extensions/openai-settings" "$agent_dir/extensions/fallback-compaction" "$agent_dir/extensions/search-tools"
+rm -rf "$agent_dir/extensions/smartbash" "$agent_dir/extensions/smartpython" "$agent_dir/extensions/openai-settings" "$agent_dir/extensions/fallback-compaction" "$agent_dir/extensions/search-tools" \
+  "$agent_dir/extensions/tool-bash" "$agent_dir/extensions/tool-python"
 
 for package in "${packages[@]}"; do
   target="$agent_dir/extensions/$package"

@@ -53,7 +53,7 @@ stats:
   findingsAccepted: 1
   findingsRejected: 0`;
 
-const CODE_DUMP = `[tool-bash] done exit=1
+const CODE_DUMP = `[scripting] done exit=1
 
 
 def ranks_per_host() -> int:

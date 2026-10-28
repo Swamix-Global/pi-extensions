@@ -25,8 +25,7 @@ its own inlined `src/extension-settings.ts` helper (no shared lib import at runt
 
 | Path | Purpose |
 | --- | --- |
-| `tool-bash/` | Bash override: named commands, timeouts, pid/poll/kill handoff, full logs under `<cwd>/.pi/smartbash/`, head/tail preview. `/settings:tool-bash` |
-| `tool-python/` | uv-based `python` tool: arbitrary on-the-fly scripts with ephemeral deps, syntax-highlighted call view, per-run `script.py`/`out.log` under `<cwd>/.pi/smartpython/`. `/settings:tool-python` |
+| `tool-scripting/` | Unified script executor (bash + uv-backed python): language adapters share one runner — wait-budget progress bar across the output box top border, 10-row capped code/output boxlets, pid/poll/kill handoff, logs under `<cwd>/.pi/scripting/<language>/`. `/settings:tool-scripting [on\|off\|bash on\|off\|python on\|off]` |
 | `sgai-formatter/` | Width-aware assistant/tool Markdown rendering, including boxed YAML; answers the synchronous `sgai:format-markdown` event for tool-subagentx. |
 | `util-compaction/` | Triggers native `ctx.compact()` when estimated context crosses the threshold (default 100k); `/settings:util-compaction [on\|off\|<tokens>]`. |
 | `tool-search/` | `web_search` / `web_fetch` across deepseek, brave, perplexity, searxng and antigravity, with per-call provider selection and automatic failover. |
@@ -44,7 +43,7 @@ inlined by the bundler, so no package imports outside its own folder.
 
 ```sh
 npm run build                          # or: bash scripts/build-all.sh
-npm --prefix tool-bash run build       # or: bash scripts/build-extension.sh tool-bash
+npm --prefix tool-scripting run build  # or: bash scripts/build-extension.sh tool-scripting
 ```
 
 Bundling rules: Node builtins and host packages (`@earendil-works/pi-*`, `typebox`) stay
@@ -65,7 +64,7 @@ not this tree.
 
 ## Context-output safety
 
-tool-bash enforces a **64 KiB UTF-8 cap on the complete returned text**, including status
+tool-scripting enforces a **64 KiB UTF-8 cap on the complete returned text**, including status
 and retrieval metadata. Line elision alone is not a size limit: even a one-line log can
 be megabytes. Log scanning uses fixed-size buffers; original logs stay untouched.
 

@@ -196,11 +196,6 @@ export default function (pi: ExtensionAPI) {
 				"[u] (settings.json:extensionSettings.utilCompaction) Util compaction settings — /settings:util-compaction [on|off|<tokens>]",
 			handler: commandHandler,
 		});
-		pi.registerCommand?.("settings:fallback-compaction", {
-			description:
-				"[u] (settings.json:extensionSettings.fallbackCompaction) Fallback native compaction settings — /settings:fallback-compaction [on|off|<tokens>]",
-			handler: commandHandler,
-		});
 	} catch {}
 
 	// Only `agent_settled` guarantees no automatic retry, compaction, or queued
