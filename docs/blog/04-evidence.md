@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-evidence-source-code-analysis/).
+
 ![A magnifying glass over research notes](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-search.jpg)
 
 # Answers are better when you can inspect the evidence

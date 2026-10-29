@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-agent-web-search/).
+
 ![A magnifying glass on a collection of research notes](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-search.jpg)
 
 # Better research starts with finding the right sources

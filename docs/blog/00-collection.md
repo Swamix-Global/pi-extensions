@@ -1,3 +1,5 @@
+> **Published collection:** [Read the Swamix AI engineering blog](https://swamix.com/blog/).
+
 ![A developer's workspace with a notebook and laptop](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-hero-3-1-pro.jpg)
 
 # Build AI agents that developers can actually operate

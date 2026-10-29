@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/subagentx-multi-agent-orchestration/).
+
 ![A notebook and laptop for organizing engineering work](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-hero-3-1-pro.jpg)
 
 # Delegate the work, keep ownership of the outcome

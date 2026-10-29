@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-web-ui-local/).
+
 ![A laptop and notebook in a calm workspace](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-webui.jpg)
 
 # A local browser interface for Pi sessions

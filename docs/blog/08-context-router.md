@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-agent-context-router/).
+
 ![A ribbon passing through a brass guide beside folded paper](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-router.jpg)
 
 # A deterministic way to handle older tool history

@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-agent-context-compaction/).
+
 ![An engineering notebook on a desk](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-hero-3-1-pro.jpg)
 
 # Long conversations need an explicit context strategy

@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-agent-markdown-formatter/).
+
 ![A calm, organized developer workspace](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-script.jpg)
 
 # Readability is a feature of an agent system

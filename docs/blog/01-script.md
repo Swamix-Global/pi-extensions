@@ -1,3 +1,5 @@
+> **Published article:** [Read this guide on swamix.com](https://swamix.com/blog/pi-script-tool-bash-python/).
+
 ![A keyboard and notebook arranged for a software workflow](https://raw.githubusercontent.com/Swamix-Global/pi-extensions/main/docs/assets/swamix-script.jpg)
 
 # One interface for Bash and Python: meet the `script` tool
