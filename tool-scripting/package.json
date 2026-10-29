@@ -3,9 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "tool-scripting: unified script executor for Pi. Language adapters (bash, python) share one runner: named runs, wait-budget progress bar, boxed code/output views, pid/poll/kill handoff, full logs.",
+  "description": "A unified Bash and uv-backed Python tool for Pi, with per-call working directories, optional Python dependencies, persistent execution logs, timeout handoff, and boxed terminal views.",
   "keywords": [
-    "pi-extension"
+    "pi-extension",
+    "developer-tools",
+    "bash",
+    "python",
+    "uv",
+    "scripting"
   ],
   "pi": {
     "extensions": [

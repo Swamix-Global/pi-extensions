@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="420" viewBox="0 0 1440 420" role="img" aria-labelledby="title desc">
+<title id="title">Script execution lifecycle</title><desc id="desc">A started script may complete, hand off at the wait budget while still running, or be terminated after abort. Successful runs write logs.</desc>
+<rect width="1440" height="420" rx="24" fill="#101b29"/>
+<text x="64" y="67" fill="#f6f5f0" font-family="Arial, sans-serif" font-size="30" font-weight="700">A timeout is a handoff—not a kill deadline</text>
+<text x="64" y="104" fill="#adc2ca" font-family="Arial, sans-serif" font-size="18">Know what happened before retrying a command that can change data.</text>
+<rect x="64" y="171" width="290" height="110" rx="14" fill="#183348" stroke="#62d6cc" stroke-width="2"/><text x="89" y="216" fill="#fff" font-family="Arial, sans-serif" font-size="24" font-weight="700">Start a script</text><text x="89" y="249" fill="#b6ced6" font-family="Arial, sans-serif" font-size="16">Bash or uv-backed Python</text>
+<path d="M354 226 H446 M446 226 V160 H535 M446 226 H535 M446 226 V292 H535" fill="none" stroke="#72aab6" stroke-width="3"/><circle cx="446" cy="226" r="6" fill="#72aab6"/>
+<rect x="535" y="126" width="840" height="65" rx="12" fill="#173c3c"/><text x="558" y="167" fill="#b2f5df" font-family="Arial, sans-serif" font-size="19"><tspan font-weight="700">COMPLETES</tspan><tspan dx="18">Return the result and inspect the log as needed.</tspan></text>
+<rect x="535" y="197" width="840" height="65" rx="12" fill="#4b3729"/><text x="558" y="238" fill="#ffe0a4" font-family="Arial, sans-serif" font-size="19"><tspan font-weight="700">WAIT BUDGET</tspan><tspan dx="18">Return PID + log; the process continues.</tspan></text>
+<rect x="535" y="268" width="840" height="65" rx="12" fill="#443037"/><text x="558" y="309" fill="#f4c4c0" font-family="Arial, sans-serif" font-size="19"><tspan font-weight="700">ABORT</tspan><tspan dx="18">Attempt process-group termination.</tspan></text>
+<text x="64" y="386" fill="#91a8b3" font-family="Arial, sans-serif" font-size="16">SWAMIX GLOBAL AI SOLUTIONS</text><text x="1188" y="386" fill="#91a8b3" font-family="Arial, sans-serif" font-size="16">swamix.com</text>
+</svg>

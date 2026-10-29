@@ -137,13 +137,19 @@ export class ScriptResultBox implements Component {
 				.join("\n");
 			const stripped = text.startsWith(this.adapter.prefix) ? text.split("\n").slice(1).join("\n") : text;
 			if (stripped) for (const line of stripped.split("\n")) outputLines.push(this.theme.fg("dim", line));
+		} else if (!d.status) {
+			// Older built-in tools have no scripting details. Render their saved
+			// text directly instead of silently displaying an empty box.
+			for (const c of this.result.content ?? []) if (c.type === "text" && c.text) {
+				for (const line of c.text.split("\n")) outputLines.push(this.theme.fg("dim", line));
+			}
 		} else {
 			const head = (d.head ?? []).slice(0, 3);
 			const tail = (d.tail ?? []).slice(-3);
-			const gap = (d.totalLines ?? 0) > head.length + tail.length;
+			const total = d.totalLines ?? 0;
 			for (const l of head) outputLines.push(this.theme.fg("dim", l));
-			if (gap) outputLines.push(this.theme.fg("muted", `… ${d.totalLines} lines total (full output in result + log)`));
-			for (const l of tail) outputLines.push(this.theme.fg("dim", l));
+			if (total > head.length + tail.length) outputLines.push(this.theme.fg("muted", `… ${total} lines total (full output in result + log)`));
+			for (const l of tail.slice(Math.max(0, head.length + tail.length - total))) outputLines.push(this.theme.fg("dim", l));
 		}
 		const meta =
 			d.status === "timeout" || d.status === "aborted" || d.elided || (d.totalLines ?? 0) > 10
@@ -165,9 +171,8 @@ export class ScriptResultBox implements Component {
 			this.theme.fg("muted", `… +more rows truncated (log: ${d.log ?? ""})`),
 		);
 		const metaRows = wrapTextWithAnsi(lines[lines.length - 1], inner);
-		for (const row of statusRows) out.push(frameRow(border, inner, row));
-		for (const row of outputRows) out.push(frameRow(border, inner, row));
-		for (const row of metaRows) out.push(frameRow(border, inner, row));
+		const body = capWrapped([...statusRows, ...outputRows, ...metaRows], inner, DISPLAY_ROWS, () => this.theme.fg("muted", "… more rows (see full log)"));
+		for (const row of body) out.push(frameRow(border, inner, row));
 		out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
 		return out;
 	}

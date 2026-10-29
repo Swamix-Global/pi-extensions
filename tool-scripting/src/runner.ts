@@ -191,9 +191,8 @@ export async function runScript(
 	if (!name) throw new Error("name is required: what is this run for, in ≤5 words");
 
 	const defaultDir = typeof ctx?.cwd === "string" && ctx.cwd ? ctx.cwd : process.cwd();
-	const directory = expandDir(
-		typeof params.directory === "string" && params.directory.trim() ? params.directory : defaultDir,
-	);
+	const requestedDir = typeof params.directory === "string" && params.directory.trim() ? params.directory : defaultDir;
+	const directory = requestedDir === "~" || requestedDir.startsWith("~/") ? expandDir(requestedDir) : path.resolve(defaultDir, requestedDir);
 	if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory())
 		throw new Error(`directory does not exist or is not a directory: ${directory}`);
 	const waitS = clampWait(params.timeout, adapter.defaultWaitS, adapter.maxWaitS);
@@ -299,8 +298,8 @@ export async function runScript(
 							text: outputText(
 								`${adapter.prefix} timed out waiting after ${waitS}s — "${name}" is still running (pid ${pid}).\n` +
 								`log: ${logPath}\n` +
-								`poll: bash { name: "check ${slug}", command: "tail -n 200 '${logPath}'", timeout: 10 }\n` +
-								`stop: bash { name: "stop ${slug}", command: "kill ${pid}" }\n` +
+								`poll: script mode=bash, title="check ${slug}", script=${JSON.stringify(`tail -n 200 -- '${logPath.replace(/'/g, "'\\''")}'`)}\n` +
+								`stop: script mode=bash, title="stop ${slug}", script="kill ${pid}"\n` +
 								(tailText ? `\n${tailText}` : "")),
 						},
 					],
