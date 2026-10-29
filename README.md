@@ -6,7 +6,7 @@ Pi's extension APIs; installation does not patch the Pi runtime.
 
 Start with the [Script Tool guide](tool-scripting/README.md) for the unified Bash/Python
 API, examples, execution semantics, architecture, and known limitations. For a practical
-walkthrough of the tools and modules, see the [Swamix AI engineering field guide](docs/blog/00-collection.md).
+walkthrough of the tools and modules, see the [Swamix AI engineering field guide](docs/blog/00-collection.md), also available as a [public gist collection](https://gist.github.com/nikhil-swamix/427c5438d2dc2597f382b28ef430015f).
 
 **Custom implementation and support:** [nikhil@swamix.com](mailto:nikhil@swamix.com) · [swamix.com](https://swamix.com).
 
