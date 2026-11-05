@@ -1,7 +1,7 @@
 # Pi extensions
 
 A collection of source-installable Pi extensions for script execution, tool rendering,
-search, evidence retrieval, context management, and delegated work. Each extension uses
+search, local exploration, context management, and delegated work. Each extension uses
 Pi's extension APIs; installation does not patch the Pi runtime.
 
 Start with the [Script Tool guide](tool-scripting/README.md) for the unified Bash/Python
@@ -20,7 +20,6 @@ target, never the source of truth.
 ```sh
 bash install.sh                     # build packages and deploy the directory-based extensions
 bash tool-subagentx/install.sh      # build + register tool-subagentx as a pi package
-python3 tool-query/reinstall.py     # register the tool-query evidence engine package
 ```
 
 Then run `/reload` in open Pi sessions. Do not also register a source package with
@@ -39,11 +38,10 @@ its own inlined `src/extension-settings.ts` helper (no shared lib import at runt
 | Path | Purpose |
 | --- | --- |
 | [`tool-scripting/`](tool-scripting/README.md) | One `script` tool with `mode=bash\|python`, raw source, working directory, and wait budget. Python uses uv with optional dependencies. Includes persistent logs, timeout handoff, and boxed terminal views; native Bash remains available. |
-| `sgai-formatter/` | Width-aware assistant/tool Markdown rendering, including boxed YAML; answers the synchronous `sgai:format-markdown` event for tool-subagentx. |
+| `sgai-formatter/` | Width-aware assistant/tool Markdown rendering; also exposes the synchronous `sgai:format-markdown` event. |
 | `util-compaction/` | Triggers native `ctx.compact()` when estimated context crosses the threshold (default 100k); `/settings:util-compaction [on\|off\|<tokens>]`. |
 | `tool-search/` | `web_search` / `web_fetch` across deepseek, brave, perplexity, searxng and antigravity, with per-call provider selection and automatic failover. |
-| `tool-query/` | Evidence query engine package (`@sgai/pi-tool-query`): the `evidence` tool, Python CLI, tests and `reinstall.py`. Self-registers. |
-| `tool-subagentx/` | SubagentX package (`@sgai/pi-tool-subagentx`): `src/sgai-subagentx.ts`, minified `build/reloadable/tool-subagentx.js`, `install.sh` / `uninstall.sh`. Self-registers. |
+| [`tool-subagentx/`](tool-subagentx/README.md) | One task-based tool with `explorer` (read/search/list), `worker` (local write/execute), and `default` (Luna/subscription GLM) profiles. In-memory child communication; no run documents or standalone explorer/worker packages. |
 | `scripts/` | `build-extension.sh <package>` reads `pi.extensions[0]` and bundles `src/index.ts`; `build-all.sh` builds every package. |
 | `package.json` | Private workspace root: package list, `build` and `install:pi` scripts. |
 
@@ -85,10 +83,7 @@ npm --prefix tool-scripting run build  # or: bash scripts/build-extension.sh too
 
 Bundling rules: Node builtins and host packages (`@earendil-works/pi-*`, `typebox`) stay
 external; everything inside the package, including the helper modules, is inlined.
-`tool-subagentx` keeps its own `build.sh` because it also inlines third-party dependencies
-(`execa`, `yaml`, `lodash-es`, `tree-kill`) and minifies. `tool-subagentx` still loads a few
-agent-owned runtime libraries (`local-ai.mjs`, `deepseek-ai.mjs`, `nest-result.mjs`) from `$PI_CODING_AGENT_DIR/lib` — those belong to the agent deployment,
-not this tree.
+`tool-subagentx` keeps its own `build.sh` for minification and a cache-busting reload entry. It has no third-party runtime dependencies or agent-owned library imports.
 
 ## Adding an extension
 
@@ -136,8 +131,8 @@ or runner-only test does not prove extension discovery or visual behavior.
 ```sh
 git -c core.hooksPath=.githooks hook run pre-commit   # repository's configured checks
 node --test tests/test-tool-scripting.mjs            # deployed scripting bundle; run install.sh first
-cd tool-query && python3 -B tests/fanout_unit.py      # offline evidence-engine validation
-node --test ../tests/test-subagent-rendering.mjs      # umbrella repo; real Pi TUI, run install.sh first
+node --test tool-subagentx/tests/profiles.test.mjs    # profile isolation, IPC, rotation and lifecycle
+node tool-subagentx/tests/live.mjs                   # actual local child tools, fixture verification, no run files
 ```
 
 Suites drive installed or built copies, so build before testing.

@@ -9,13 +9,8 @@
     "extensions": ["build/tool-subagentx.js"]
   },
   "scripts": {
-    "build": "bash build.sh"
-  },
-  "dependencies": {
-    "execa": "^10.1.0",
-    "lodash-es": "^4.18.1",
-    "tree-kill": "^1.2.2",
-    "yaml": "^2.9.1"
+    "build": "bash build.sh",
+    "test": "node --test tests/profiles.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

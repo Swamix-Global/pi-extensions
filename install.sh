@@ -14,7 +14,7 @@ rm -f "$agent_dir/lib/extension-settings.mjs"   # settings helper is inlined int
 
 # Clean up retired pre-migration folders so pi does not load obsolete duplicates.
 rm -rf "$agent_dir/extensions/smartbash" "$agent_dir/extensions/smartpython" "$agent_dir/extensions/openai-settings" "$agent_dir/extensions/fallback-compaction" "$agent_dir/extensions/search-tools" \
-  "$agent_dir/extensions/tool-bash" "$agent_dir/extensions/tool-python"
+  "$agent_dir/extensions/tool-bash" "$agent_dir/extensions/tool-python" "$agent_dir/extensions/tool-call-display" "$agent_dir/extensions/tool-slm" "$agent_dir/extensions/tool-query" "$agent_dir/extensions/tool-explorer" "$agent_dir/extensions/tool-worker"
 
 for package in "${packages[@]}"; do
   target="$agent_dir/extensions/$package"
@@ -30,4 +30,4 @@ for package in "${packages[@]}"; do
 done
 
 printf 'Extensions installed in %s/extensions. Run /reload in existing Pi sessions to activate.\n' "$agent_dir"
-printf 'Packages tool-query and tool-subagentx register themselves: python3 tool-query/reinstall.py, bash tool-subagentx/install.sh.\n'
+printf 'Packages tool-subagentx registers itself: bash tool-subagentx/install.sh.\n'

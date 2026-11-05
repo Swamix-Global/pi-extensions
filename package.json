@@ -9,7 +9,6 @@
     "sgai-formatter",
     "util-compaction",
     "tool-search",
-    "tool-query",
     "tool-subagentx"
   ],
   "scripts": {

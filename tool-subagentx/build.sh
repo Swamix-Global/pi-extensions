@@ -10,9 +10,9 @@ NODE_MODULES_SRC="${PI_AGENT_NODE_MODULES:-$HOME/.pi/agent/node_modules}"
 # Build-time dependency resolution against the versions the agent runtime uses.
 [ -e node_modules ] || ln -s "$NODE_MODULES_SRC" node_modules
 
-mkdir -p build
+mkdir -p build/reloadable
 "$BUN" build src/sgai-subagentx.ts \
-  --outfile build/tool-subagentx.js \
+  --outfile build/reloadable/tool-subagentx.js \
   --target=node \
   --format=esm \
   --minify \
@@ -20,5 +20,6 @@ mkdir -p build
   --external "@earendil-works/pi-tui" \
   --external "typebox"
 
-cp -f build/tool-subagentx.js build/sgai-subagentx.js
-wc -c build/tool-subagentx.js
+cp src/loader.js build/tool-subagentx.js
+rm -f build/sgai-subagentx.js
+wc -c build/reloadable/tool-subagentx.js
