@@ -13,7 +13,7 @@
     ]
   },
   "scripts": {
-    "build": "bash ../../scripts/build-extension.sh sgai-formatter"
+    "build": "bash ../scripts/build-extension.sh sgai-formatter"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

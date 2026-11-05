@@ -3,7 +3,7 @@
  *
  * Tracks the currently selected model's provider and smart-polls only that
  * provider's usage endpoint every 30s (configurable), rendering a dense,
- * right-justified, quota-only readout:  `● 5h 42% 🕐1h12m │ 7d 12% 🕐3d4h`
+ * right-justified, quota-only readout:  `● 5h 42% left 🕐1h12m │ 7d 12% left 🕐3d4h`
  * (the model name is redundant — the footer already shows it on the left).
  *
  * Adapters:
@@ -23,22 +23,53 @@
  *     unit 3 rows are the 5h window, unit 6 rows the weekly window; plan from
  *     data.level. Host: open.bigmodel.cn for *cn* or bigmodel ids, else api.z.ai.
  *
+ * Visual language (one right-justified quota group + one quiet left meter):
+ *
+ *   ⚡ 15.9M │ 360r          ● 5h ██████▏░░ 88% left 🕐3h20m │ 7d █████▉░ 70% left 🕐6d22h
+ *
+ * Three ink levels only: chrome (tag, separator, the word `left`, the reset
+ * clock) in dim slate, the gauge and the percent in the window's fuel tint, and
+ * bold reserved as an escalation channel from 51% left down. Gauges use eighth
+ * blocks (▏▎▍▌▋▊▉) so a 13% window draws `▊` instead of overstating itself as a
+ * whole cell, over a slate `░` track — the hatch reads as a tank whose level
+ * has dropped, never as fuel, and it never borrows the segment's hot tint.
+ * Numbers are column-padded to three cells so a 100→99→8 drain does not shuffle
+ * the group, and the left meter reuses the same `│` divider the windows use, so
+ * both halves of the row speak one visual language.
+ *
+ * The two windows are deliberately asymmetric: the 5h window is the actionable
+ * one (it turns over several times a day), so it owns the widest gauge, while
+ * the weekly window is context and gets a shorter one, then none. Tinting
+ * encodes LEVEL, never alarm — a comfortable 84% still looks comfortable.
+ *
  * Status line ownership: quota-helper composes the whole extension status row —
- * the persistent subagentx local-usage pill on the LEFT (`[ ⚡ 15.9M · 303r ]`,
- * read live from ~/.pi/agent/subagentx-local-usage.json) and the dense quota
- * readout flush RIGHT. pi joins extension statuses alphabetically by key and
+ * the persistent subagentx local-usage meter on the LEFT (`⚡ 15.9M │ 360r`, read
+ * live from ~/.pi/agent/subagentx-local-usage.json) and the dense quota readout
+ * flush RIGHT. pi joins extension statuses alphabetically by key and
  * truncates the tail at terminal width, so this padded line (key `quota-helper`
  * sorts first) absorbs subagentx's own plain-text meter twin invisibly; if
  * quota-helper ever hides (auth rejected / unsupported provider), the twin
  * resurfaces untouched and the meter never disappears. A graded density
- * ladder picks the widest variant that fits the remaining width: fuel-gauge
- * bars at 6/5/4/3 cells with clock resets
- * (`● 5h ██████ 95% 🕐3h20m │ 7d █░░░░░ 15% 🕐6d22h`), then resets-only,
- * then bar+reset mixes, then percents-only; the meter pill is sacrificed
- * first. Multi-factor health is summarized by a line LED (`●`, tinted by the
- * WORST window) plus per-window urgency grading on remaining percent:
- * green ≥ 40%, amber 15–39%, red < 15% — below 8% the whole segment goes
- * bold red (the terminal-safe critical pulse).
+ * ladder picks the widest variant that fits the remaining width: gauges at
+ * 8/6→6/5→5/4→4/3→4/0→3/0→2/0 cells (primary/secondary) with clock resets,
+ * then every gauge drops while the clocks stay, then the clocks
+ * (`● 5h 88% left │ 7d 70% left`); percents and the word `left` survive every
+ * rung, and the meter is sacrificed before the reading itself. Multi-factor
+ * analysis layers three signals over the raw percents: the thirty-two-band
+ * fuel-gauge ramp (bar length, tint and `% left` all derive from quota
+ * REMAINING, running green → lime → amber → orange → pure red as the level
+ * drops, bold from 74% left, recessed into a blood-red block below 62, and
+ * inverted to black ink on a lit red plate below 44 — the plate, never the ink,
+ * carries the last of the alarm), BURN-RATE PREDICTION — a
+ * rolling least-squares
+ * velocity over the sample history projects time-to-cap per window; when the
+ * cap lands BEFORE the reset, the clock segment becomes a red `⚠1h05m` badge
+ * and the LED escalates, because a calm-looking 40% at high burn is the trap
+ * this catches. The badge is a separate channel on purpose: repainting the
+ * percent red would mean the ramp no longer answers "how much is left", and a
+ * healthy 84% burning hot would read like an almost-spent window — and
+ * STALENESS — samples older than 3 poll intervals render a hollow LED (`○`) so
+ * the readout never pretends to be fresher than it is.
  *
  * Rendering uses non-breaking-space padding: pi's footer sanitizes statuses by
  * collapsing ASCII runs, so NBSP is the only padding that survives and still
@@ -376,10 +407,12 @@ async function fetchZaiUsage(spec: AdapterSpec, cred: Credential): Promise<Quota
 
 const ANSI = /\u001b\[[0-9;]*m/g;
 
-/** Wide-glyph ranges in the emoji vocabulary this extension emits. Only RGI
- * emoji (2 cells in pi-tui) fall inside; █ ░ │ · ⋯ deliberately do not. */
+/** Wide-glyph ranges in the emoji vocabulary this extension emits, matching
+ * pi-tui: RGI emoji (emoji-presentation) are 2 cells — 🕐/⚡ — while bare ⚠
+ * (U+26A0, text-presentation by default) is 1, exactly as pi-tui and common
+ * terminals render it. █ ░ │ · ⋯ ● ○ deliberately do not fall in any range. */
 const WIDE_RANGES: Array<[number, number]> = [
-	[0x26a0, 0x27bf], // ⚡ and friends (emoji-presentation)
+	[0x26a1, 0x27bf], // ⚡ and friends (emoji-presentation; ⚠ excluded — narrow)
 	[0x1f1e6, 0x1f1ff], // regional indicators
 	[0x1f300, 0x1faff], // 🕐 and the pictographic blocks
 ];
@@ -398,31 +431,209 @@ export function visibleWidth(text: string): number {
 }
 
 const GRAY = "\u001b[38;2;130;140;150m";
-const GREEN = "\u001b[38;2;110;200;130m";
-const ORANGE = "\u001b[38;2;255;170;60m";
-const RED = "\u001b[38;2;255;90;90m";
+/** Chrome tint: window tags, separators, the word `left`. Deliberately dull so
+ * the grade-tinted percent stays the one thing the eye locks onto. */
+const SLATE = "\u001b[38;2;112;122;140m";
+const DIM = "\u001b[2m";
+/** Dimmed slate — secondary-but-quieter than a tag, for clock resets. */
+const QUIET = `${DIM}${SLATE}`;
+/** NBSP filler that holds a field's geometry when its content collapses (the
+ * threat badge inheriting the clock's cell count). pi's footer collapses ASCII
+ * runs but never NBSP, so it costs one cell and survives sanitization. */
+const BADGE_PAD = "\u00a0";
 const ACCENT = "\u001b[38;2;96;190;255m";
 const BOLD = "\u001b[1m";
 const RESET = "\u001b[0m";
 
-/** Urgency grading on REMAINING percent, shared by each window segment and
- * the line LED: calm ≥ 40%, tight 15–39%, scarce < 15%; below 8% the tone
- * runs bold (the terminal-safe critical pulse). */
-function urgencyTone(pct: number): { color: string; bold: string } {
-	if (pct < 15) return { color: RED, bold: pct < 8 ? BOLD : "" };
-	if (pct < 40) return { color: ORANGE, bold: "" };
-	return { color: GREEN, bold: "" };
+const rgb = (r: number, g: number, b: number): string => `\u001b[38;2;${r};${g};${b}m`;
+const bg = (r: number, g: number, b: number): string => `\u001b[48;2;${r};${g};${b}m`;
+/** Burn-threat badge tint: the one red that is NOT part of the fuel ramp. */
+const ALARM = `${BOLD}${rgb(255, 96, 80)}`;
+
+/** Scale a 24-bit `rgb()` ink toward the background. The gauge is the *object*,
+ * the number is the *reading* of it: printing both in one exact ink fuses the
+ * bar into its label and spends a whole step of hierarchy. 0.84 keeps the bar in
+ * the band's hue family — still far above AA on the dark plate — while the
+ * percent stays the brightest run on the row. */
+function shade(ink: string, k: number): string {
+	const m = /\u001b\[38;2;(\d+);(\d+);(\d+)m/.exec(ink);
+	if (!m) return ink;
+	const [r, g, b] = [m[1], m[2], m[3]].map(v => Math.round(Number(v) * k));
+	return rgb(r, g, b);
 }
 
-/** Line LED summarizing both windows at a glance: tinted by the WORST
- * remaining percent. Rendered as a 2-cell `● ` prefix on the quota run. */
-function healthDot(snap: QuotaSnapshot | undefined): string {
-	const pcts = [snap?.primary?.pct, snap?.secondary?.pct].filter(
-		(p): p is number => typeof p === "number",
+/** How far the fuel gauge sits below the percent's ink. */
+const GAUGE_SHADE = 0.84;
+
+export interface Grade {
+	/** Lower bound of the REMAINING percent band this grade covers. */
+	from: number;
+	/** Text ink: the percent, and — on a lit band — the chrome beside it. */
+	color: string;
+	/** Gauge ink. Only set once the number inverts, because a bar printed in the
+	 * text ink would then be BLACK, and a black bar reads as an empty one. */
+	fill?: string;
+	bold: string;
+	/** Plate behind the trailing payload (percent, word, clock). The gauge is
+	 * never drawn on it: the wash begins after the last gauge cell. */
+	wash?: string;
+	/** True when `wash` is LIT rather than a recess — chrome then flips to
+	 * `color`, so a slate tag cannot sink into a bright block. A recess keeps
+	 * chrome on slate, which still contrasts and keeps the row quiet. */
+	lit?: boolean;
+	name: string;
+}
+
+/** Thirty-six-step fuel-gauge ramp, cool → hot as quota drains. Every input to
+ * this table is the REMAINING percent — the same number the segment prints, the
+ * gauge fills and the LED tints — so a long green bar always means plenty and
+ * nothing has to be read inside-out.
+ *
+ * THE TWO LAWS.
+ *
+ * 1. Alarm may never fall as quota falls. An earlier table broke it three times.
+ *    It bought late-ramp contrast by WHITENING the text ink (255,22,20 →
+ *    255,228,226), then by LIGHTING a plate behind the whole segment
+ *    (238,86,72 → 255,132,108): both made the emptiest window the palest,
+ *    quietest row while a comfortable window in red was the loudest thing drawn.
+ *    The third break was the worst, and is what this table exists to kill:
+ *    `barFor` painted the gauge in the band's TEXT ink, so from 44% left down the
+ *    fuel itself was drawn BLACK on the lit plate while the empty trough was
+ *    drawn on that same plate — a sinking window rendered as a bar FILLING with
+ *    red, and colour read exactly backwards at the moment it mattered most.
+ *
+ * 2. The gauge is always light-on-dark, and the plate never reaches it. The fill
+ *    carries its own ink, the trough keeps slate, and the wash begins only after
+ *    the last gauge cell — so the bar can brighten monotonically to the end
+ *    without ever fighting the block behind the number.
+ *
+ * The ramp is therefore FOUR eras, each strictly louder than the one before:
+ *
+ *   1. INK, 100 → 79% left. Saturated single-hue inks on the default
+ *      background: spring green drains to lime, and a zero channel keeps every
+ *      band out of pastel.
+ *   2. WEIGHT, 76 → 56% left. Bold joins at the lime/yellow line and the hue
+ *      walks yellow → amber → orange → hot orange-red.
+ *   3. RECESS, 54 → 46% left. The ink has reached pure red (255,0,0) and cannot
+ *      get hotter, so the escalator moves to the plate: a blood-red block lights
+ *      up behind the number, r 40 → 48. It stays near-black because bright red
+ *      ink only clears WCAG AA on a dark plate.
+ *   4. INCANDESCENT, 44 → 0% left. The number flips to black bold on a LIT
+ *      saturated red plate (232,30,26 → 255,60,45: contrast 4.6 → 5.9, so the
+ *      loudest rows are also the most legible) while the FUEL climbs an
+ *      afterburner ramp, (255,52,30) → (255,158,76): the bar gets BRIGHTER as it
+ *      empties instead of going black. That second channel is the fix — the
+ *      plate says "alarm", the bar still says "fuel", and neither inverts.
+ *
+ * Purity caps are enforced by the ramp tests: fill luminance never collapses
+ * toward black, every bar clears AA against the background, every black number
+ * clears AA on its lit plate, and plate luminance never falls. Escalation starts
+ * EARLY on purpose: spring green is gone by 97% left, yellow by 72, orange by
+ * 62, bold at 76, the recess at 54, the lit plate at 44 — a half-spent window is
+ * an event, not a footnote. */
+const GRADES: readonly Grade[] = [
+	{ from: 100, color: rgb(0, 201, 118), bold: "", name: "pristine" },
+	{ from: 97, color: rgb(0, 209, 100), bold: "", name: "ample" },
+	{ from: 94, color: rgb(0, 216, 82), bold: "", name: "lush" },
+	{ from: 91, color: rgb(0, 223, 62), bold: "", name: "bountiful" },
+	{ from: 88, color: rgb(0, 230, 42), bold: "", name: "verdant" },
+	{ from: 85, color: rgb(0, 237, 22), bold: "", name: "lime" },
+	{ from: 82, color: rgb(24, 243, 4), bold: "", name: "chartreuse" },
+	{ from: 79, color: rgb(80, 247, 0), bold: "", name: "fresh" },
+	{ from: 76, color: rgb(138, 251, 0), bold: BOLD, name: "watch" },
+	{ from: 74, color: rgb(184, 254, 0), bold: BOLD, name: "brisk" },
+	{ from: 72, color: rgb(220, 255, 0), bold: BOLD, name: "caution" },
+	{ from: 70, color: rgb(248, 246, 0), bold: BOLD, name: "gilt" },
+	{ from: 68, color: rgb(252, 224, 0), bold: BOLD, name: "amber" },
+	{ from: 66, color: rgb(253, 200, 0), bold: BOLD, name: "tight" },
+	{ from: 64, color: rgb(254, 174, 0), bold: BOLD, name: "steep" },
+	{ from: 62, color: rgb(255, 148, 0), bold: BOLD, name: "flare" },
+	{ from: 60, color: rgb(255, 122, 0), bold: BOLD, name: "hot" },
+	{ from: 58, color: rgb(255, 96, 0), bold: BOLD, name: "blaze" },
+	{ from: 56, color: rgb(255, 70, 0), bold: BOLD, name: "scorch" },
+	{ from: 54, color: rgb(255, 44, 0), bold: BOLD, wash: bg(40, 2, 6), name: "hazard" },
+	{ from: 52, color: rgb(255, 20, 0), bold: BOLD, wash: bg(43, 2, 7), name: "red" },
+	{ from: 50, color: rgb(255, 0, 0), bold: BOLD, wash: bg(45, 3, 8), name: "ember" },
+	{ from: 48, color: rgb(255, 0, 0), bold: BOLD, wash: bg(47, 3, 8), name: "alert" },
+	{ from: 46, color: rgb(255, 0, 0), bold: BOLD, wash: bg(48, 4, 9), name: "scarlet" },
+	{ from: 44, color: rgb(0, 0, 0), fill: rgb(255, 52, 30), bold: BOLD, wash: bg(232, 30, 26), lit: true, name: "critical" },
+	{ from: 40, color: rgb(0, 0, 0), fill: rgb(255, 62, 34), bold: BOLD, wash: bg(234, 33, 29), lit: true, name: "grave" },
+	{ from: 36, color: rgb(0, 0, 0), fill: rgb(255, 72, 38), bold: BOLD, wash: bg(237, 36, 31), lit: true, name: "burning" },
+	{ from: 32, color: rgb(0, 0, 0), fill: rgb(255, 82, 42), bold: BOLD, wash: bg(240, 39, 34), lit: true, name: "severe" },
+	{ from: 28, color: rgb(0, 0, 0), fill: rgb(255, 92, 46), bold: BOLD, wash: bg(243, 42, 36), lit: true, name: "inferno" },
+	{ from: 24, color: rgb(0, 0, 0), fill: rgb(255, 102, 50), bold: BOLD, wash: bg(246, 45, 39), lit: true, name: "terminal" },
+	{ from: 20, color: rgb(0, 0, 0), fill: rgb(255, 112, 54), bold: BOLD, wash: bg(248, 48, 41), lit: true, name: "molten" },
+	{ from: 16, color: rgb(0, 0, 0), fill: rgb(255, 122, 58), bold: BOLD, wash: bg(250, 51, 42), lit: true, name: "searing" },
+	{ from: 12, color: rgb(0, 0, 0), fill: rgb(255, 131, 62), bold: BOLD, wash: bg(252, 53, 43), lit: true, name: "plasma" },
+	{ from: 8, color: rgb(0, 0, 0), fill: rgb(255, 140, 66), bold: BOLD, wash: bg(253, 56, 44), lit: true, name: "core" },
+	{ from: 4, color: rgb(0, 0, 0), fill: rgb(255, 149, 70), bold: BOLD, wash: bg(254, 58, 44), lit: true, name: "detonate" },
+	{ from: 0, color: rgb(0, 0, 0), fill: rgb(255, 158, 76), bold: BOLD, wash: bg(255, 60, 45), lit: true, name: "nova" },
+];
+
+/** Ramp index where the bold ("weight") era begins. From here up the band is
+ * loud enough that the window tag may carry its ink too. */
+const HOT_TAG_INDEX = GRADES.findIndex(g => g.bold !== "");
+
+/** Empty-gauge tint: slate, deliberately outside the fuel ramp — colder and
+ * quieter than every band, so density and hue agree with `% left`. */
+const TROUGH = rgb(88, 96, 112);
+/** Unfilled-cell texture: `█████▊░░` reads as a tank whose level has dropped.
+ * Deliberately NOT a background reset — inside a washed (critical) band the
+ * block's own wash stays behind the trough, so the empty half reads as a recess
+ * cut into the lit block instead of a default-background hole punched through
+ * it, and the tint stays slate either way. */
+const TRACK = "\u2591";
+
+/** Quota LEFT percent, 0–100 — the single value every visual derives from the
+ * provider's used percent. Overruns clamp at 0 (nothing left); garbage
+ * collapses to 100 (assume plenty) so a bad row never fakes an alarm. */
+export function leftPercent(usedPct: number): number {
+	const used = Number.isFinite(usedPct) ? usedPct : 0;
+	return Math.min(100, Math.max(0, 100 - used));
+}
+
+/** Grade a REMAINING percent (0–100). Shared by every window segment and the
+ * line LED: 100 is calmest, 0 is the bold critical pulse. */
+export function quotaGrade(leftPct: number): Grade {
+	const left = Number.isFinite(leftPct) ? Math.max(0, leftPct) : 100;
+	return GRADES.find(g => left >= g.from) ?? GRADES[GRADES.length - 1];
+}
+
+
+/** Burn-threat grade, layered over the fuel ramp: a window projected to hit its
+ * cap before reset escalates to the `critical` band, and to the bold critical
+ * band once the cap is under 30 minutes away. The table runs cool → hot, so the
+ * hottest grade is the LAST element. */
+function threatGrade(f: WindowForecast | undefined): Grade | undefined {
+	if (!f?.threatensReset || f.etaMs === undefined) return undefined;
+	if (f.etaMs < THREAT_RED_MS) return GRADES[GRADES.length - 1];
+	// burn velocity is itself an alarm: floor the tint at `low` so a
+	// comfortable-looking window that will not survive the reset still warns.
+	return quotaGrade(THREAT_FLOOR_LEFT);
+}
+
+/** Multi-factor tone: the hotter of the remaining-quota grade and the
+ * burn-threat grade — velocity can escalate a calm-looking window. Both inputs
+ * come from the GRADES table, which runs cool → hot, so the higher index wins. */
+function hotterGrade(a: Grade, b: Grade | undefined): Grade {
+	if (!b) return a;
+	return GRADES.indexOf(b) > GRADES.indexOf(a) ? b : a;
+}
+
+/** Line LED summarizing both windows at a glance: tinted by the WORST window
+ * (LOWEST quota left) and escalated by any burn threat; hollow (`○`) when the
+ * data is stale. Rendered as a 2-cell prefix. */
+function healthDot(snap: QuotaSnapshot | undefined, style?: SnapshotStyle): string {
+	const lefts = [snap?.primary?.pct, snap?.secondary?.pct]
+		.filter((p): p is number => typeof p === "number")
+		.map(leftPercent);
+	if (lefts.length === 0) return "";
+	const tone = hotterGrade(
+		quotaGrade(Math.min(...lefts)),
+		threatGrade(style?.primary) ?? threatGrade(style?.secondary),
 	);
-	if (pcts.length === 0) return "";
-	const tone = urgencyTone(Math.min(...pcts));
-	return `${tone.bold}${tone.color}●${RESET} `;
+	const glyph = style?.fresh === false ? "○" : "●";
+	return `${tone.bold}${tone.fill ?? tone.color}${glyph}${RESET} `;
 }
 
 /** Compact relative duration: "45s", "12m", "1h12m", "3d4h". */
@@ -438,60 +649,343 @@ export function formatDuration(ms: number): string {
 	return `${d}d${h % 24}h`;
 }
 
-/** Fuel gauge at `cells` columns: █ filled / ░ empty, proportional to
- * REMAINING pct — the bar drains as quota is consumed, exactly like the
- * number beside it. Cell count comes from the density ladder. */
-function barFor(pct: number, cells: number): string {
-	const filled = Math.min(cells, Math.max(0, Math.round((pct / 100) * cells)));
-	return "█".repeat(filled) + "░".repeat(cells - filled);
+/** Freshness floor for the hollow-LED decision; the poller widens this to
+ * 3× its poll interval so a single missed beat never reads as stale. */
+const STALE_MIN_MS = 90_000;
+
+// ---------------------------------------------------------------------------
+// trend analysis — burn-rate prediction (multi-factor; pure; unit-tested)
+// ---------------------------------------------------------------------------
+
+export interface TrendSample {
+	/** Epoch ms of the observation. */
+	t: number;
+	/** Primary (5h) used percent. */
+	primary: number;
+	/** Secondary (weekly) used percent, when reported. */
+	secondary?: number;
 }
 
-function windowText(tag: string, w: QuotaWindow, bars: number, resets: boolean): string {
-	const pct = Math.round(w.pct);
-	// one cohesive color run: label + gauge + percent share the urgency tone;
-	// below 8% remaining the whole segment goes bold (critical pulse).
-	const tone = urgencyTone(w.pct);
-	let text = `${tone.bold}${tone.color}${tag} `;
-	if (bars > 0) text += `${barFor(w.pct, bars)} `;
-	text += `${pct}%${RESET}`;
-	if (resets && w.resetsAtMs) {
-		const left = formatDuration(w.resetsAtMs - Date.now());
-		if (left) text += `${GRAY} 🕐${left}${RESET}`;
+export interface WindowForecast {
+	/** Least-squares usage velocity, percent per hour (negative = recovering). */
+	ratePerHour: number;
+	/** Projected ms until the window hits 100% at that rate (rising only). */
+	etaMs?: number;
+	/** True when the projected cap lands before the window resets. */
+	threatensReset: boolean;
+}
+
+/** Compact time-to-cap for the ⚠ segment: sub-minute reads "now", short
+ * horizons keep minute precision, long ones collapse to hours (⚠42h). */
+function etaText(ms: number): string {
+	if (ms < 60_000) return "now";
+	return ms >= 10 * 3_600_000 ? `${Math.round(ms / 3_600_000)}h` : formatDuration(ms);
+}
+
+export interface TrendAnalysis {
+	primary?: WindowForecast;
+	secondary?: WindowForecast;
+	/** False when the newest sample outlives the staleness budget. */
+	fresh: boolean;
+}
+
+const TREND_MAX_SAMPLES = 24;
+const TREND_MAX_SPAN_MS = 3 * 3_600_000;
+const TREND_MIN_GAP_MS = 20_000; // bursty header harvests collapse into one sample
+const TREND_MIN_POINTS_MS = 5 * 60_000; // shortest history regression trusts
+const TREND_FLAT_RATE_PER_HOUR = 0.5; // below this the window is effectively idle
+const THREAT_GRACE_MS = 60_000; // cap landing within a minute of the reset is no threat
+const THREAT_RED_MS = 30 * 60_000; // cap closer than this burns bold red
+/** Remaining-percent floor a projected overrun escalates the line LED to: the
+ * `low` band, so burn velocity alone lights a comfortable window up without
+ * pretending the window is nearly spent. */
+const THREAT_FLOOR_LEFT = 16;
+
+/** Record one observation into the rolling history: within the min gap the
+ * newest sample is overwritten (header harvests are bursty), beyond the sample
+ * cap or the span budget the oldest drop off. Mutates `history`. */
+export function pushTrendSample(
+	history: TrendSample[],
+	snap: QuotaSnapshot | undefined,
+	nowMs: number,
+): void {
+	const pct = snap?.primary?.pct;
+	if (typeof pct !== "number") return;
+	const t = snap.fetchedAtMs || nowMs;
+	const secondary = snap?.secondary?.pct;
+	const sample: TrendSample = { t, primary: pct, ...(typeof secondary === "number" ? { secondary } : {}) };
+	const last = history[history.length - 1];
+	if (last && t - last.t < TREND_MIN_GAP_MS) history[history.length - 1] = sample;
+	else history.push(sample);
+	while (
+		history.length > TREND_MAX_SAMPLES ||
+		(history.length > 1 && history[history.length - 1].t - history[0].t > TREND_MAX_SPAN_MS)
+	) {
+		history.shift();
 	}
-	return text;
 }
 
-/** Responsive density ladder, widest first. Clocks are the non-redundant
- * info (the % already implies fill) so bars thin out 6→5→4→3 and drop
- * entirely before the clock resets do; percents-only is the final rung. */
-export interface DensityConfig {
+/** Least-squares slope of pct over t in percent/hour; undefined until the
+ * history spans TREND_MIN_POINTS_MS with ≥ 2 distinct samples. */
+export function slopePerHour(points: Array<{ t: number; pct: number }>): number | undefined {
+	if (points.length < 2) return undefined;
+	const t0 = points[0].t;
+	const tN = points[points.length - 1].t;
+	if (tN - t0 < TREND_MIN_POINTS_MS) return undefined;
+	const n = points.length;
+	let sx = 0, sy = 0, sxx = 0, sxy = 0;
+	for (const p of points) {
+		const x = (p.t - t0) / 3_600_000; // hours since the first sample
+		sx += x; sy += p.pct; sxx += x * x; sxy += x * p.pct;
+	}
+	const denom = n * sxx - sx * sx;
+	if (denom === 0) return undefined;
+	return (n * sxy - sx * sy) / denom;
+}
+
+function seriesFor(history: TrendSample[], key: "primary" | "secondary"): Array<{ t: number; pct: number }> {
+	return history
+		.map(s => ({ t: s.t, pct: s[key] }))
+		.filter((p): p is { t: number; pct: number } => typeof p.pct === "number")
+		.sort((a, b) => a.t - b.t); // regression is order-independent; history should be, too
+}
+
+/** Project one window: velocity from the sample history, time-to-cap from the
+ * remaining percent, threat when the cap lands before the reset does. */
+export function forecastWindow(
+	points: Array<{ t: number; pct: number }>,
+	w: QuotaWindow | undefined,
+	nowMs: number,
+): WindowForecast | undefined {
+	if (!w) return undefined;
+	const rate = slopePerHour(points);
+	if (rate === undefined) return undefined;
+	const etaMs = rate > TREND_FLAT_RATE_PER_HOUR ? ((100 - w.pct) / rate) * 3_600_000 : undefined;
+	const resetsIn = w.resetsAtMs !== undefined ? w.resetsAtMs - nowMs : undefined;
+	const threatensReset = etaMs !== undefined && resetsIn !== undefined && etaMs < resetsIn - THREAT_GRACE_MS;
+	return { ratePerHour: rate, etaMs, threatensReset };
+}
+
+/** Analyze the rolling history against the newest snapshot; `staleAfterMs`
+ * bounds freshness (3× the poll interval is the sane budget). */
+export function analyzeTrend(
+	history: TrendSample[],
+	snap: QuotaSnapshot | undefined,
+	nowMs: number,
+	staleAfterMs: number,
+): TrendAnalysis {
+	if (!snap) return { fresh: false };
+	return {
+		primary: forecastWindow(seriesFor(history, "primary"), snap.primary, nowMs),
+		secondary: forecastWindow(seriesFor(history, "secondary"), snap.secondary, nowMs),
+		fresh: nowMs - snap.fetchedAtMs <= staleAfterMs,
+	};
+}
+
+/** Eighth-block fill glyphs: the gauge resolves 1/8 of a cell instead of
+ * rounding to whole cells, so a 13% window draws `▊` and a 84% window draws
+ * `█████▏` — the bar never claims more quota than there is. */
+const PARTIAL: readonly string[] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+/** Fuel gauge at `cells` columns: solid fill over a slate `░` track, proportional
+ * to the REMAINING pct — the bar drains as quota burns, so its length, its tint
+ * and the `% left` beside it all tell the same story. The trough is painted
+ * slate (TROUGH), never the segment's hot grade, so a nearly-empty window cannot
+ * masquerade as a full red bar. Cell count comes from the density ladder; the
+ * fractional cell is an eighth-block.
+ *
+ * The gauge never touches the band's plate: the filled run resets to the default
+ * background, so the bar is always ink-on-dark no matter how loud the row is.
+ * Painting it the band's TEXT ink instead — the previous design — drew the fuel
+ * BLACK from 44% left down, on a lit red plate, while the empty trough sat on
+ * that same plate: the sink read as a bar filling with red, i.e. a reversed
+ * gauge exactly where a reversal is least affordable. `fill` exists so the last
+ * era can go incandescent (brightening as quota drains) while the number, which
+ * needs AA contrast, stays black. */
+function barFor(leftPct: number, cells: number, tone: Grade): string {
+	// Fuel ink, never the text ink: on a lit band `color` is black.
+	const paint = tone.fill ?? shade(tone.color, GAUGE_SHADE);
+	const left = Number.isFinite(leftPct) ? Math.min(100, Math.max(0, leftPct)) : 100;
+	const exact = (left / 100) * cells;
+	let full = Math.floor(exact);
+	let eighths = Math.round((exact - full) * 8);
+	if (eighths === 8) {
+		full += 1;
+		eighths = 0;
+	}
+	let partial = PARTIAL[eighths];
+	// any quota at all keeps one sliver, so the hot grade still shows instead of
+	// collapsing into an all-trough bar (which reads as "empty").
+	if (left > 0 && full === 0 && !partial) partial = PARTIAL[1];
+	full = Math.min(full, cells);
+	const empty = Math.max(0, cells - full - (partial ? 1 : 0));
+	const filled = `\u001b[49m${paint}${"█".repeat(full)}${partial ?? ""}`;
+	const drawn = empty > 0 ? `${filled}\u001b[49m${TROUGH}${TRACK.repeat(empty)}` : filled;
+	// hand the run back to the segment's own grade (and wash) for the percent
+	return `${drawn}${RESET}${tone.bold}${tone.color}${tone.wash ?? ""}`;
+}
+
+/** Quota-left label with sub-1% precision: providers that report exact ratios
+ * (zai) can leave a real 0.4% sliver, and rounding it to a flat `0%` would claim
+ * the window is spent while it still has tokens. Whole numbers everywhere else,
+ * so the common case stays one glyph-run wide. */
+export function formatLeftPercent(leftPct: number): string {
+	const left = Number.isFinite(leftPct) ? Math.max(0, leftPct) : 100;
+	if (left === 0 || left >= 1) return `${Math.round(left)}%`;
+	return `${left.toFixed(1)}%`;
+}
+
+/** Column-stable percent field: a window draining 100 → 99 → 8 must not
+ * shuffle the whole group sideways on every poll, so short values are padded to
+ * three cells (` 8%`). The pad is NBSP, not a space, because pi's footer
+ * sanitizer collapses runs of ASCII spaces — padding with `" "` next to the
+ * separator space would silently shave a cell off the row and unseat the
+ * flush-right alignment. Sub-1% waits (0.4%) already fill four cells. */
+function padPercent(leftPct: number): string {
+	const text = formatLeftPercent(leftPct);
+	return text.length >= 3 ? text : "\u00a0".repeat(3 - text.length) + text;
+}
+
+export interface WindowStyle {
+	/** Gauge cells (0 = no gauge). */
 	bars: number;
+	/** Print the reset clock — and the ⚠ cap badge in its place when threatened. */
 	resets: boolean;
+	/** Print BOTH the ⚠ cap badge and the clock when a window is threatened. */
+	threatClock?: boolean;
+	/** Print the word `left` after the percent. */
+	word?: boolean;
+	/** Burn-rate projection for this window. */
+	forecast?: WindowForecast;
+}
+
+/** One window segment: quiet tag · fuel gauge · BOLD percent · chrome clock.
+ *
+ *   5h █████▊▁▁ 84% left 🕐3h48m
+ *
+ * Everything derives from the REMAINING percent, so bar, tint and number tell
+ * the same story. A window projected to cap before its reset swaps the clock
+ * for a red `⚠16m` badge — an added channel rather than a repaint, because the
+ * tint's contract is "how much is left" and a healthy 84% burning hot must
+ * still look healthy while its badge shouts.
+ */
+function windowText(tag: string, w: QuotaWindow, style: WindowStyle): string {
+	const left = leftPercent(w.pct);
+	const tone = quotaGrade(left);
+	const lit = tone.lit === true;
+	const on = `${tone.bold}${tone.color}${tone.wash ?? ""}`;
+	// Chrome ink follows the band. On a lit plate slate — and worse, dim slate —
+	// sinks into the red, so washed bands redraw every chrome run in the same
+	// black the numbers use, re-asserting the plate after each RESET. Nothing is
+	// printed between a RESET and the re-assertion, so the block stays continuous
+	// from the gauge through the clock instead of breaking off after the percent.
+	const quiet = lit ? `${RESET}${tone.wash}${tone.color}` : `${RESET}${QUIET}`;
+	// Heat telegraph: once the band enters its bold era the window tag takes the
+	// band's own ink, so a hot segment announces itself at its LEFT edge — the eye
+	// catches the red `5h` before it has read a single digit. Cool bands keep the
+	// quiet slate tag: escalation must stay monotone and slate is the floor.
+	const hot = GRADES.indexOf(tone) >= HOT_TAG_INDEX;
+	const tagInk = lit || hot ? `${tone.color}` : SLATE;
+	// A spent window is a special case of ``chrome follows the band``: with 0%
+	// left the reset is the only actionable fact on the row, so the clock is
+	// promoted to the segment's own bold ink instead of staying quiet chrome.
+	const spent = left < 0.5;
+	const clockInk = spent ? `${RESET}${tone.wash ?? ""}${BOLD}${tone.color}` : quiet;
+	const alarmInk = lit ? `${RESET}${tone.wash}${BOLD}${tone.color}` : ALARM;
+	// The clock field is computed even when the threat badge replaces it, so the
+	// badge inherits the clock's EXACT geometry: a firing prediction swaps five
+	// cells of text for five cells of text instead of shortening the segment and
+	// sliding the whole right-justified group three cells sideways mid-poll.
+	const clockBody = style.resets && w.resetsAtMs ? formatDuration(w.resetsAtMs - Date.now()) : "";
+	let text = `${tagInk}${tag}${RESET} `;
+	text += style.bars > 0
+		? `${barFor(left, style.bars, tone)} ${padPercent(left)}`
+		: `${tone.wash ?? ""}${on}${padPercent(left)}`;
+	if (style.word) text += `${quiet} left`;
+	if (style.forecast?.threatensReset && style.forecast.etaMs !== undefined) {
+		// cap projected BEFORE the reset: the actionable number is time-to-cap
+		const badge = `⚠${etaText(style.forecast.etaMs)}`;
+		if (style.threatClock && clockBody) {
+			// widest rung: velocity AND recovery on one row — how long you have, and
+			// how long until it comes back, without opening the detail view.
+			text += `${alarmInk} ${badge}${quiet} 🕐${clockBody}`;
+		} else {
+			// floor rung: the badge INHERITS the clock's exact geometry, and pads on the
+			// LEFT so the segment still ends on a visible glyph — padding on the right
+			// leaves the flush-right group short of the margin by exactly the width
+			// difference, a ragged edge that appears only while under threat.
+			const field = clockBody ? visibleWidth(`🕐${clockBody}`) : 0;
+			text += `${alarmInk} ${BADGE_PAD.repeat(Math.max(0, field - visibleWidth(badge)))}${badge}`;
+		}
+	} else if (clockBody) {
+		text += `${clockInk} 🕐${clockBody}`;
+	}
+	return `${text}${RESET}`;
+}
+
+/** Responsive density ladder, widest first, degrading MONOTONICALLY in every
+ * dimension: the weekly gauge drops first, then gauge cells thin 8→2, then every
+ * gauge goes while the reset clocks stay, then the clocks. Percents and the word
+ * `left` survive every rung — they are the payload, not decoration. Gauges are
+ * the first casualty because `% left` already implies fill, while the reset
+ * stamp carries information the percentage cannot. A mark that disappears at
+ * some width never returns at a narrower one, so resizing can never flicker the
+ * footer between layouts. */
+export interface DensityConfig {
+	/** Primary (5h) gauge cells. */
+	bars: number;
+	/** Clock resets (also gates the ⚠ cap badge). */
+	resets: boolean;
+	/** Secondary (7d) gauge cells; defaults to `bars`. */
+	secondaryBars?: number;
+	/** Print the word `left`; defaults to true. */
+	word?: boolean;
+	/** Print the ⚠ cap badge AND the reset clock side by side when threatened. */
+	threatClock?: boolean;
 }
 
 const DENSITY_LADDER: readonly DensityConfig[] = [
-	{ bars: 6, resets: true },
-	{ bars: 5, resets: true },
-	{ bars: 4, resets: true },
-	{ bars: 3, resets: true },
-	{ bars: 0, resets: true },
-	{ bars: 3, resets: false },
-	{ bars: 0, resets: false },
+	{ bars: 8, secondaryBars: 6, resets: true, word: true, threatClock: true },
+	{ bars: 8, secondaryBars: 6, resets: true, word: true },
+	{ bars: 6, secondaryBars: 5, resets: true, word: true },
+	{ bars: 5, secondaryBars: 4, resets: true, word: true },
+	{ bars: 4, secondaryBars: 3, resets: true, word: true },
+	{ bars: 4, secondaryBars: 0, resets: true, word: true },
+	{ bars: 3, secondaryBars: 0, resets: true, word: true },
+	{ bars: 2, secondaryBars: 0, resets: true, word: true },
+	{ bars: 0, secondaryBars: 0, resets: true, word: true },
+	{ bars: 0, secondaryBars: 0, resets: false, word: true },
 ];
 
 /** One-line quota readout for the footer: dense quota-only, health LED, clock
- * resets. `● 5h ██████ 95% 🕐3h20m │ 7d █░░░░░ 15% 🕐6d22h` (full density) down
- * to `5h 95% │ 7d 15%` (percents-only). Labels stay parallel (`5h` / `7d`,
- * both durations); the model name is deliberately omitted — the footer's left
- * side already shows it. */
-export function formatSnapshot(snap: QuotaSnapshot | undefined, density: DensityConfig = { bars: 0, resets: true }): string {
+ * resets. Both the percentage and the gauge cell count are quota LEFT (the
+ * inverse of the wire `used_percent`), tinted by the fuel grade.
+ * `● 5h ███████▏░░ 88% left 🕐3h20m │ 7d █████▉░ 70% left 🕐6d22h` at full
+ * density, down to `● 5h 88% left │ 7d 70% left` (percents-only); a threatened
+ * window swaps its clock for `⚠1h05m`. Labels stay parallel (`5h` / `7d`, both
+ * durations); the model name is deliberately omitted — the footer's left side
+ * already shows it. */
+export interface SnapshotStyle {
+	/** False renders the hollow stale LED. */
+	fresh?: boolean;
+	primary?: WindowForecast;
+	secondary?: WindowForecast;
+}
+
+export function formatSnapshot(snap: QuotaSnapshot | undefined, density: DensityConfig = { bars: 0, resets: true }, style?: SnapshotStyle): string {
 	if (!snap) return `${GRAY}quota ⋯${RESET}`;
 	const sep = `${GRAY} │ ${RESET}`;
+	const word = density.word !== false;
+	const secondaryBars = density.secondaryBars ?? density.bars;
 	const parts: string[] = [];
-	if (snap.primary) parts.push(windowText("5h", snap.primary, density.bars, density.resets));
-	if (snap.secondary) parts.push(windowText("7d", snap.secondary, density.bars, density.resets));
+	if (snap.primary) {
+		parts.push(windowText("5h", snap.primary, { bars: density.bars, resets: density.resets, word, threatClock: density.threatClock, forecast: style?.primary }));
+	}
+	if (snap.secondary) {
+		parts.push(windowText("7d", snap.secondary, { bars: secondaryBars, resets: density.resets, word, threatClock: density.threatClock, forecast: style?.secondary }));
+	}
 	const body = parts.length > 0 ? parts.join(sep) : `${GRAY}quota ⋯${RESET}`;
-	return healthDot(snap) + body;
+	return healthDot(snap, style) + body;
 }
 
 /** Right-justify by padding with NBSP. pi's footer runs trim() on every status
@@ -534,60 +1028,130 @@ export function formatTokensCompact(n: number): string {
 	return `${Math.round(n / 1_000_000)}M`;
 }
 
-/** Left pill: `[ ⚡ 15.9M · 303r ]` — lifetime local-model usage, exactly 19
- * cells for typical values. All glyphs width-accounted: ⚡ is 2 cells. */
-export function formatLocalPill(u: LocalUsage): string {
-	return `${GRAY}[${RESET} ${ACCENT}⚡${RESET} ${BOLD}${formatTokensCompact(u.totalTokens)}${RESET} ${GRAY}· ${u.totalRuns}r${RESET} ${GRAY}]${RESET}`;
+export type PillVariant = "full" | "compact";
+
+/** Left meter, richest first: `⚡ 15.9M │ 360r` (full) or `⚡15.9M` (compact) —
+ * lifetime local-model usage. Bracketless on purpose: it reuses the same `│`
+ * divider as the quota windows, so both halves of the row speak one visual
+ * language and the footer keeps a single rhythm. The run count is the first
+ * thing to go — it is a curiosity, the token total is the meter. All glyphs
+ * width-accounted (⚡ is 2 cells, exactly as pi-tui measures it). */
+export function formatLocalPill(u: LocalUsage, variant: PillVariant = "full"): string {
+	if (variant === "compact") return `${ACCENT}⚡${RESET}${BOLD}${formatTokensCompact(u.totalTokens)}${RESET}`;
+	return `${ACCENT}⚡${RESET} ${BOLD}${formatTokensCompact(u.totalTokens)}${RESET}${SLATE} │ ${u.totalRuns}r${RESET}`;
 }
 
 // ---------------------------------------------------------------------------
 // status line composition (pill left · NBSP gap · quota flush right)
 // ---------------------------------------------------------------------------
 
+/** Pill variants, richest → sparsest. Fixed, so a narrowing terminal walks
+ * forward through the (density, pill) preference order and never back. */
+const PILL_ORDER: readonly PillVariant[] = ["full", "compact"];
+
+/** Meter-only line for the states where the quota itself has nothing to say:
+ * the active provider exposes no quota adapter, or its credential is rejected.
+ * The lifetime local-model counter is independent furniture, so it parks at the
+ * left margin (status rows begin at column 0) instead of vanishing along with
+ * the quota — and it still owns the shared status row, so a sibling meter twin
+ * cannot append and push the footer into truncation. Degrades full → compact →
+ * nothing as the viewport narrows. */
+export function composeMeterOnly(meter: LocalUsage | undefined, columns: number): string | undefined {
+	if (!meter) return undefined;
+	for (const variant of PILL_ORDER) {
+		const candidate = formatLocalPill(meter, variant);
+		if (visibleWidth(candidate) <= columns) return candidate;
+	}
+	return undefined;
+}
+
 /** Compose the full status row: meter pill on the LEFT, quota flush RIGHT,
- * NBSP-padded to exactly `columns` cells. The density ladder walks widest →
- * narrowest; the widest variant that still fits after the pill wins, the pill
- * is dropped only when nothing fits beside it, and the composition is
- * width-exact at every step (never wraps, never truncates in real terms). */
+ * NBSP-padded to exactly `columns` cells. The pill walks full → compact → gone
+ * and, at each pill size, the density ladder walks widest → narrowest — both
+ * fixed orders, so a narrowing terminal only ever sheds detail: gauges thin,
+ * then clocks drop, then the run count goes, then the meter itself, and no mark
+ * ever returns at a smaller width. Composition is width-exact at every step
+ * (never wraps, never truncates). */
 export function composeStatusLine(
 	snap: QuotaSnapshot | undefined,
 	meter: LocalUsage | undefined,
 	columns: number,
 	showResets = true,
+	trend?: TrendAnalysis,
 ): string {
 	const pill = meter ? formatLocalPill(meter) : "";
 	const pillW = pill ? visibleWidth(pill) : 0;
-	const ladder = (showResets ? DENSITY_LADDER : DENSITY_LADDER.map(d => ({ ...d, resets: false }))).map(d =>
-		formatSnapshot(snap, d),
+	const style: SnapshotStyle | undefined = trend
+		? { fresh: trend.fresh, primary: trend.primary, secondary: trend.secondary }
+		: undefined;
+	const ladder = (showResets ? DENSITY_LADDER : DENSITY_LADDER.map(d => ({ ...d, resets: false, threatClock: false }))).map(d =>
+		formatSnapshot(snap, d, style),
 	);
 	if (pill) {
-		const beside = ladder.find(q => pillW + 2 + visibleWidth(q) <= columns);
-		if (beside !== undefined) {
-			const pad = columns - pillW - visibleWidth(beside);
-			return pill + RESET + "\u00a0".repeat(pad) + beside;
+		// Pill-major: hold the meter at full fidelity while any rung still fits
+		for (const variant of PILL_ORDER) {
+			const candidate = formatLocalPill(meter, variant);
+			const candidateW = visibleWidth(candidate);
+			for (const quota of ladder) {
+				const quotaW = visibleWidth(quota);
+				if (candidateW + 2 + quotaW <= columns) {
+					return candidate + RESET + "\u00a0".repeat(columns - candidateW - quotaW) + quota;
+				}
+			}
 		}
+		// Not even the compact pill fits beside the narrowest rung: sacrifice it
+		// and let the bare quota re-walk the ladder from the top — a clean dense
+		// percentage line beats a squashed meter with nothing to meter.
+		const bare = ladder.find(q => visibleWidth(q) <= columns);
+		return rightJustify(bare ?? `${GRAY}quota ⋯${RESET}`, columns);
 	}
 	const bare = ladder.find(q => visibleWidth(q) <= columns) ?? `${GRAY}quota ⋯${RESET}`;
 	return rightJustify(bare, columns);
 }
 
-/** Multi-line detail report for /quota. */
-export function detailReport(spec: AdapterSpec, modelId: string, snap: QuotaSnapshot | undefined, meter?: LocalUsage): string {
+/** Multi-line detail report for /quota. The optional trend/history arguments
+ * carry the multi-factor analysis: per-window burn velocity, projected
+ * time-to-cap vs. reset, and sample telemetry. */
+export function detailReport(
+	spec: AdapterSpec,
+	modelId: string,
+	snap: QuotaSnapshot | undefined,
+	meter?: LocalUsage,
+	trend?: TrendAnalysis,
+	history?: TrendSample[],
+	nowMs: number = Date.now(),
+): string {
 	const head = `${spec.label} · ${modelId}${snap?.plan ? ` · plan ${snap.plan}` : ""}${snap?.source ? ` · via ${snap.source}` : ""}`;
 	if (!snap) return `${head}\nno quota data yet`;
 	const lines = [head];
 	const row = (name: string, w?: QuotaWindow) => {
 		if (!w) return;
 		const pct = Math.round(w.pct);
+		const leftPct = leftPercent(w.pct);
 		const units = w.total !== undefined && w.used !== undefined ? ` · ${Math.round(w.used)}/${Math.round(w.total)} units` : "";
-		const reset = w.resetsAtMs ? ` · resets in ${formatDuration(w.resetsAtMs - Date.now())}` : "";
+		const reset = w.resetsAtMs ? ` · resets in ${formatDuration(w.resetsAtMs - nowMs)}` : "";
 		const window = w.windowSeconds ? ` · ${(w.windowSeconds / 3600).toFixed(0)}h window` : "";
-		lines.push(`${name}: ${pct}% used${units}${window}${reset}`);
+		lines.push(`${name}: ${formatLeftPercent(leftPct)} left · ${pct}% used${units}${window}${reset}`);
 	};
 	row("5h window", snap.primary);
 	row("weekly", snap.secondary);
+	const trendLine = (name: string, w: QuotaWindow | undefined, f?: WindowForecast) => {
+		if (!w || !f) return;
+		const pace = `${f.ratePerHour >= 0 ? "+" : ""}${f.ratePerHour.toFixed(1)}%/h`;
+		if (f.etaMs === undefined) lines.push(`trend (${name}): ${pace} · idle — no cap risk`);
+		else if (f.threatensReset) {
+			const resetsIn = w.resetsAtMs !== undefined ? formatDuration(w.resetsAtMs - nowMs) : "?";
+			lines.push(`trend (${name}): ${pace} · cap in ~${formatDuration(f.etaMs)} · BEFORE reset (${resetsIn} away)`);
+		} else lines.push(`trend (${name}): ${pace} · cap in ~${formatDuration(f.etaMs)} · after reset — safe`);
+	};
+	trendLine("5h", snap.primary, trend?.primary);
+	trendLine("weekly", snap.secondary, trend?.secondary);
 	if (snap.credits) lines.push(`credits: ${snap.credits}`);
 	if (meter) lines.push(`local meter: ${formatTokensCompact(meter.totalTokens)} tokens · ${meter.totalRuns} runs (persistent)`);
+	if (history && history.length > 0) {
+		const age = formatDuration(nowMs - history[history.length - 1].t);
+		lines.push(`samples: ${history.length} · newest ${age ? `${age} ago` : "just now"}`);
+	}
 	return lines.join("\n");
 }
 
@@ -601,6 +1165,8 @@ export interface QuotaConfig {
 	enabled: boolean;
 	intervalMs: number;
 	showResets: boolean;
+	/** Burn-rate prediction layer (multi-factor trend analysis). */
+	predictions: boolean;
 }
 
 export function readConfig(block: Record<string, unknown>): QuotaConfig {
@@ -609,6 +1175,7 @@ export function readConfig(block: Record<string, unknown>): QuotaConfig {
 		enabled: block.enabled !== false,
 		intervalMs: Math.min(Math.max(interval, 5_000), 600_000),
 		showResets: block.showResets !== false,
+		predictions: block.predictions !== false,
 	};
 }
 
@@ -626,6 +1193,7 @@ export class QuotaPoller {
 	private family = ""; // kind:host — stable across openai↔openai-codex model switches
 	private modelId = "";
 	private snapshot: QuotaSnapshot | undefined;
+	private readonly trend: TrendSample[] = [];
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private inFlight = false;
 	private fails = 0;
@@ -650,6 +1218,7 @@ export class QuotaPoller {
 		this.modelId = model?.id ?? "";
 		if (familyChanged) {
 			this.snapshot = undefined;
+			this.trend.length = 0; // windows differ: history is void
 			this.fails = 0;
 			this.nextAttemptAt = 0;
 			this.hidden = false;
@@ -693,6 +1262,7 @@ export class QuotaPoller {
 		try {
 			const snap = await fetchQuota(this.spec);
 			this.snapshot = snap;
+			pushTrendSample(this.trend, snap, Date.now());
 			this.fails = 0;
 			this.nextAttemptAt = 0;
 			if (this.hidden) this.hidden = false;
@@ -734,22 +1304,38 @@ export class QuotaPoller {
 				: prev?.secondary,
 			fetchedAtMs: Date.now(),
 		};
+		pushTrendSample(this.trend, this.snapshot, Date.now());
 		this.render();
 	}
 
 	render(): void {
 		if (!this.sink) return;
+		const cols = process.stdout.columns ?? 80;
+		const meter = readLocalUsage(this.localUsageFile);
 		if (!this.spec || this.hidden) {
-			this.sink(undefined);
+			// No quota to report, but the local meter is not quota furniture: keep it
+			// anchored at the left margin rather than letting the whole row vanish.
+			this.sink(composeMeterOnly(meter, cols));
 			return;
 		}
-		const cols = process.stdout.columns ?? 80;
-		this.sink(composeStatusLine(this.snapshot, readLocalUsage(this.localUsageFile), cols, this.cfg.showResets));
+		const staleAfter = Math.max(STALE_MIN_MS, 3 * this.cfg.intervalMs);
+		const trend = analyzeTrend(this.trend, this.snapshot, Date.now(), staleAfter);
+		this.sink(
+			composeStatusLine(
+				this.snapshot,
+				meter,
+				cols,
+				this.cfg.showResets,
+				this.cfg.predictions ? trend : { fresh: trend.fresh },
+			),
+		);
 	}
 
 	report(): string | undefined {
 		if (!this.spec) return undefined;
-		return detailReport(this.spec, this.modelId, this.snapshot, readLocalUsage(this.localUsageFile));
+		const staleAfter = Math.max(STALE_MIN_MS, 3 * this.cfg.intervalMs);
+		const trend = analyzeTrend(this.trend, this.snapshot, Date.now(), staleAfter);
+		return detailReport(this.spec, this.modelId, this.snapshot, readLocalUsage(this.localUsageFile), trend, this.trend);
 	}
 }
 

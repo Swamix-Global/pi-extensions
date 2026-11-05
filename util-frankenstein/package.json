@@ -17,7 +17,7 @@
     ]
   },
   "scripts": {
-    "build": "bash ../../scripts/build-extension.sh util-frankenstein"
+    "build": "bash ../scripts/build-extension.sh util-frankenstein"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

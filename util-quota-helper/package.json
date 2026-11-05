@@ -13,7 +13,7 @@
 		]
 	},
 	"scripts": {
-		"build": "bash ../../scripts/build-extension.sh util-quota-helper"
+		"build": "bash ../scripts/build-extension.sh util-quota-helper"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"

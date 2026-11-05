@@ -13,7 +13,7 @@
 		]
 	},
 	"scripts": {
-		"build": "bash ../../scripts/build-extension.sh util-questionnaire"
+		"build": "bash ../scripts/build-extension.sh util-questionnaire"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",

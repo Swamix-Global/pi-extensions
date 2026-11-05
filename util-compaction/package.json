@@ -13,7 +13,7 @@
     ]
   },
   "scripts": {
-    "build": "bash ../../scripts/build-extension.sh util-compaction"
+    "build": "bash ../scripts/build-extension.sh util-compaction"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
