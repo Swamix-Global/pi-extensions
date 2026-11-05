@@ -85,7 +85,7 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
   const collapsedLines = callCollapsed.render(80);
   assert.ok(collapsedLines.length <= 3, 'collapsed call must be compact, not dumping all lines');
   assert.ok(collapsedLines.join('\n').includes('First line of task'));
-  assert.ok(collapsedLines.join('\n').includes('words'));
+  assert.ok(collapsedLines.join('\n').includes('w)'), 'word count badge present');
 
   const callExpanded = tool.renderCall({ profile: 'explorer', task: longTask }, theme, { expanded: true });
   const expandedLines = callExpanded.render(80);
@@ -93,7 +93,7 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
 
   // 2. Result rendering: partial, error, and success with bottom stats line
   const partial = tool.renderResult({ content: [], details: { profile: 'explorer', model: 'sglang/lfm3-1.7b-fp8', elapsedMs: 3200 } }, { expanded: false, isPartial: true }, theme);
-  assert.ok(partial.render(80).join('\n').includes('Running'));
+  assert.ok(partial.render(80).join('\n').includes('RUNNING'));
 
   const resultData = {
     content: [{ type: 'text', text: '### Summary\nPoint 1: all good\nPoint 2: verified\nPoint 3: done' }],
@@ -105,13 +105,13 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
   const resCollapsed = tool.renderResult(resultData, { expanded: false, isPartial: false }, theme);
   const resLines = resCollapsed.render(100);
   const renderedOutput = resLines.join('\n');
-  assert.ok(renderedOutput.includes('✓ Subagent Completed'), 'success header present');
+  assert.ok(renderedOutput.includes('Completed'), 'success header present');
   assert.ok(renderedOutput.includes('Point 1: all good'), 'preview of findings present');
   assert.ok(renderedOutput.includes('1.2k'), 'input tokens displayed');
   assert.ok(renderedOutput.includes('300'), 'output tokens displayed');
   assert.ok(renderedOutput.includes('5.0k'), 'cache read tokens displayed');
   assert.ok(renderedOutput.includes('$0.00'), 'cost displayed');
-  assert.ok(renderedOutput.includes('⚡ Local All-Time:'), 'global local model usage counter displayed at bottom line');
+  assert.ok(renderedOutput.includes('⚡ Local:'), 'global local model usage counter displayed at bottom line');
 
   // Error result has stats line too
   const errorData = {
@@ -121,9 +121,9 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
   };
   const resError = tool.renderResult(errorData, { expanded: false, isPartial: false }, theme);
   const errorOutput = resError.render(100).join('\n');
-  assert.ok(errorOutput.includes('✗ Subagent Failed'), 'error header present');
+  assert.ok(errorOutput.includes('Failed'), 'error header present');
   assert.ok(errorOutput.includes('Connection refused'), 'error text present');
-  assert.ok(errorOutput.includes('⚡ Local All-Time:'), 'global local stats present on error bottom line');
+  assert.ok(errorOutput.includes('⚡ Local:'), 'global local stats present on error bottom line');
 });
 
 test('actual factory IPC, rotation, failover, settings, no run files, concurrent calls and reload', async () => {

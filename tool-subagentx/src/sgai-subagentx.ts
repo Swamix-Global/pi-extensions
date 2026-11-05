@@ -266,6 +266,22 @@ function safeMarkdownTheme(t: any): any {
   };
 }
 
+export function profilePill(profile: string, theme: any): string {
+  if (profile === "explorer") return theme.fg("accent", theme.bold("[ ⚡ explorer ]"));
+  if (profile === "worker") return theme.fg("warning", theme.bold("[ ⚙ worker ]"));
+  return theme.fg("toolTitle", theme.bold("[ ★ default ]"));
+}
+
+export function fitVisible(str: string, maxCols: number): string {
+  if (visibleWidth(str) <= maxCols) return str;
+  let cur = "";
+  for (const char of str) {
+    if (visibleWidth(cur + char + "…") > maxCols) break;
+    cur += char;
+  }
+  return `${cur}…`;
+}
+
 export default function subagentx(pi: ExtensionAPI) {
   let cursor = 0;
   const active = new Set<AbortController>();
@@ -411,108 +427,119 @@ export default function subagentx(pi: ExtensionAPI) {
     },
     renderCall(args, theme, context) {
       const profile = (args?.profile ?? "default") as Profile;
-      const profileBadge = profile === "explorer"
-        ? theme.fg("accent", theme.bold("[explorer]"))
-        : profile === "worker"
-          ? theme.fg("warning", theme.bold("[worker]"))
-          : theme.fg("toolTitle", theme.bold("[default]"));
-
+      const pill = profilePill(profile, theme);
       const modelStr = args?.model
-        ? theme.fg("dim", ` · ${args.model}`)
+        ? theme.fg("dim", `· ${args.model}`)
         : profile === "default"
-          ? theme.fg("dim", " · pool")
-          : theme.fg("dim", ` · ${LOCAL_MODEL.split("/").pop()}`);
-      const timeoutStr = args?.timeout_seconds ? theme.fg("dim", ` · ${args.timeout_seconds}s`) : "";
-      const header = `${theme.fg("toolTitle", theme.bold("subagentx"))} ${profileBadge}${modelStr}${timeoutStr}`;
-
+          ? theme.fg("dim", "· pool")
+          : theme.fg("dim", `· ${LOCAL_MODEL.split("/").pop()}`);
+      const timeoutStr = args?.timeout_seconds ? theme.fg("dim", `· ${args.timeout_seconds}s`) : "";
       const task = String(args?.task ?? "").trim();
-      if (!task) return new Text(header, 0, 0);
-
       const isExpanded = Boolean(context?.expanded);
-      if (isExpanded) {
-        const fullLines = task.split("\n").map((l) => theme.fg("dim", `  ${l}`));
-        return new Text(`${header}\n${fullLines.join("\n")}`, 0, 0);
-      }
 
-      // Collapsed: neat headline and preview
-      const lines = task.split("\n").map((l) => l.trim()).filter(Boolean);
-      const first = lines[0] ?? "";
-      const firstShort = first.length > 110 ? `${first.slice(0, 107)}…` : first;
-      const wordCount = task.split(/\s+/).length;
-      const isMulti = lines.length > 1 || first.length > 110;
-      const badge = isMulti ? theme.fg("muted", ` (${wordCount} words)`) : "";
+      return {
+        render(width: number): string[] {
+          const header = `${theme.fg("toolTitle", theme.bold("subagentx"))} ${pill} ${modelStr}${timeoutStr ? ` ${timeoutStr}` : ""}`;
+          if (!task) return [header];
 
-      return new Text(`${header}\n  ${theme.fg("dim", firstShort)}${badge}`, 0, 0);
+          if (isExpanded) {
+            const lines = task.split("\n").map((l) => theme.fg("dim", `  ${l}`));
+            return [header, ...lines];
+          }
+
+          // Collapsed: budget single line preview strictly against available terminal width
+          const lines = task.split("\n").map((l) => l.trim()).filter(Boolean);
+          const first = lines[0] ?? "";
+          const wordCount = task.split(/\s+/).length;
+          const wordBadge = ` (${wordCount}w)`;
+          const badgeVisual = visibleWidth(wordBadge);
+          const avail = Math.max(15, width - 4 - badgeVisual);
+          const snippet = fitVisible(first, avail);
+
+          return [
+            header,
+            `  ${theme.fg("toolOutput", snippet)}${theme.fg("muted", wordBadge)}`,
+          ];
+        },
+        invalidate() {},
+      };
     },
     renderResult(res, { expanded, isPartial }, theme) {
       const data = (res.details ?? {}) as Record<string, any>;
       const profile = (data.profile ?? "default") as Profile;
-      const profileBadge = profile === "explorer"
-        ? theme.fg("accent", `[${profile}]`)
-        : profile === "worker"
-          ? theme.fg("warning", `[${profile}]`)
-          : theme.fg("toolTitle", `[${profile}]`);
       const model = data.model ? (data.model.split("/").pop() ?? data.model) : "";
       const elapsed = data.elapsedMs ? formatDuration(data.elapsedMs) : "0s";
       const text = (res.content ?? []).filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();
+      const usage: ChildUsage = data.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+      const turns = usage.turns || (Array.isArray(data.attempts) ? data.attempts.length : 0);
+
+      // Helper to compose the mini highlighted boxes bottom stats dashboard
+      const renderBottomStats = (width: number): string[] => {
+        const dividerWidth = Math.max(16, Math.min(width - 2, 78));
+        const divider = theme.fg("dim", "─".repeat(dividerWidth));
+        const statusIcon = res.isError ? theme.fg("error", "✖") : theme.fg("success", "✔");
+        const totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+
+        const inStr = `${theme.fg("dim", "↑")}${theme.fg("muted", formatTokens(usage.input))}`;
+        const outStr = `${theme.fg("dim", "↓")}${theme.fg("toolOutput", formatTokens(usage.output))}`;
+        const cacheStr = `${theme.fg("dim", "R")}${theme.fg("success", formatTokens(usage.cacheRead))}`;
+        const tokInner = totalTokens > 0
+          ? `${theme.bold(formatTokens(totalTokens))} tok ${theme.fg("dim", "│")} ${inStr} ${outStr} ${cacheStr}`
+          : `0 tok`;
+        const pillTok = `${theme.fg("dim", "[")} ${tokInner} ${theme.fg("dim", "]")}`;
+
+        const costVal = usage.cost > 0
+          ? (usage.cost > 0.05 ? theme.fg("warning", `$${usage.cost.toFixed(4)}`) : theme.fg("toolOutput", `$${usage.cost.toFixed(4)}`))
+          : theme.fg("toolOutput", "$0.00");
+        const pillCost = `${theme.fg("dim", "[")} ${costVal} ${theme.fg("dim", "]")}`;
+
+        const globalLocal = readGlobalLocalUsage();
+        const pillLocal = globalLocal.totalTokens > 0
+          ? `${theme.fg("dim", "[")} ${theme.fg("warning", "⚡ Local:")} ${theme.fg("accent", theme.bold(formatTokens(globalLocal.totalTokens)))} ${theme.fg("dim", `(${globalLocal.totalRuns}r)`)} ${theme.fg("dim", "]")}`
+          : "";
+
+        const line1 = `${statusIcon} ${pillTok} ${pillCost}${pillLocal ? ` ${pillLocal}` : ""}`;
+        if (visibleWidth(line1) <= width - 2) {
+          return [divider, line1];
+        }
+
+        // If width < 85, stack local counter neatly to avoid right clipping
+        const row1 = `${statusIcon} ${pillTok} ${pillCost}`;
+        const row2 = pillLocal ? `  ${pillLocal}` : "";
+        return row2 ? [divider, row1, row2] : [divider, row1];
+      };
 
       // 1. Partial / Running state
       if (isPartial) {
-        const header = `${theme.fg("accent", "●")} ${theme.bold("Running")} ${profileBadge}${model ? ` · ${theme.fg("dim", model)}` : ""}${elapsed ? ` · ${theme.fg("muted", elapsed)}` : ""}`;
-        const hint = theme.fg("dim", "  ⏳ Delegated execution in progress (Ctrl+C to abort)...");
-        return new Text(`${header}\n${hint}`, 0, 0);
+        return {
+          render(width: number): string[] {
+            const SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            const elapsedMs = Number(data.elapsedMs) || 0;
+            const spin = SPINNERS[Math.floor(elapsedMs / 80) % SPINNERS.length];
+            const turnsStr = turns > 0 ? theme.fg("dim", `(turn ${turns}) `) : "";
+
+            const top = `${theme.fg("accent", theme.bold(spin))} ${theme.fg("accent", theme.bold("RUNNING"))} ${theme.fg("dim", "·")} ${theme.fg("muted", elapsed)} ${turnsStr}${theme.fg("dim", "·")} ${profilePill(profile, theme)}`;
+            const hint = `${theme.fg("warning", "  ⏳ Delegated execution in progress")} ${theme.fg("dim", "(Ctrl+C to abort)")}`;
+
+            const outLines = [top, hint];
+            if (text) {
+              const clean = text.split("\n").map((l: string) => l.trim()).filter(Boolean);
+              const last = clean[clean.length - 1];
+              if (last) {
+                const avail = Math.max(10, width - 6);
+                outLines.push(`  ${theme.fg("dim", "↳")} ${theme.fg("toolOutput", fitVisible(last, avail))}`);
+              }
+            }
+            return outLines;
+          },
+          invalidate() {},
+        };
       }
-
-      // Helper to compose the comprehensive bottom stats line
-      const renderBottomStats = (width: number): string[] => {
-        const divider = theme.fg("dim", "─".repeat(Math.max(20, Math.min(width - 2, 78))));
-        const statusIcon = res.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-        const usage: ChildUsage = data.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
-        const totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-        const turnsStr = usage.turns > 0 ? theme.fg("dim", `${usage.turns} turn${usage.turns > 1 ? "s" : ""}`) : "";
-        const timeStr = elapsed ? theme.fg("muted", elapsed) : "";
-
-        const tokenParts: string[] = [];
-        if (usage.input > 0) tokenParts.push(`${theme.fg("dim", "↑")}${theme.fg("muted", formatTokens(usage.input))}`);
-        if (usage.output > 0) tokenParts.push(`${theme.fg("dim", "↓")}${theme.fg("toolOutput", formatTokens(usage.output))}`);
-        if (usage.cacheRead > 0) tokenParts.push(`${theme.fg("dim", "R")}${theme.fg("success", formatTokens(usage.cacheRead))}`);
-        const tokenBreakdown = tokenParts.length > 0
-          ? `${tokenParts.join(" ")} ${theme.fg("dim", `(${formatTokens(totalTokens)} tok)`)}`
-          : totalTokens > 0 ? theme.fg("dim", `${formatTokens(totalTokens)} tok`) : "";
-
-        const costStr = usage.cost > 0
-          ? theme.fg(usage.cost > 0.05 ? "warning" : "muted", `$${usage.cost.toFixed(4)}`)
-          : theme.fg("dim", "$0.00");
-
-        const globalLocal = readGlobalLocalUsage();
-        const globalLocalStr = globalLocal.totalTokens > 0
-          ? `${theme.fg("warning", "⚡ Local All-Time:")} ${theme.fg("accent", formatTokens(globalLocal.totalTokens))} ${theme.fg("dim", `(${globalLocal.totalRuns} runs)`)}`
-          : "";
-
-        const primaryParts = [
-          `${statusIcon} ${profileBadge}`,
-          model ? theme.fg("dim", model) : "",
-          timeStr,
-          turnsStr,
-          tokenBreakdown,
-          costStr,
-        ].filter(Boolean);
-
-        const line1 = primaryParts.join(theme.fg("dim", " · "));
-        if (!globalLocalStr) return [divider, line1];
-
-        // Combine if width permits
-        const combined = `${line1} ${theme.fg("dim", "·")} ${globalLocalStr}`;
-        if (visibleWidth(combined) <= width - 2) {
-          return [divider, combined];
-        }
-        return [divider, line1, globalLocalStr];
-      };
 
       // 2. Error state
       if (res.isError) {
-        const errorHeader = `${theme.fg("error", "✗ Subagent Failed")} ${profileBadge}${model ? ` · ${theme.fg("dim", model)}` : ""}${elapsed ? ` · ${theme.fg("warning", elapsed)}` : ""}`;
-        const errorMsg = theme.fg("error", `  ${text.split("\n")[0] || "Unknown error"}`);
+        const errorHeader = `${theme.fg("error", "✖ Failed")} ${theme.fg("dim", "·")} ${theme.fg("warning", elapsed)} ${theme.fg("dim", `· ${turns} turn${turns > 1 ? "s" : ""}`)} ${theme.fg("dim", "·")} ${profilePill(profile, theme)} ${theme.fg("dim", "· (Ctrl+O for diagnostic)")}`;
+        const errorMsg = theme.fg("error", `  ✖ ${text.split("\n")[0] || "Unknown error"}`);
         const detailLines = text.split("\n").slice(1).filter(Boolean);
 
         const container = new Container();
@@ -520,7 +547,7 @@ export default function subagentx(pi: ExtensionAPI) {
         container.addChild(new Text(errorMsg, 0, 0));
         if (detailLines.length > 0) {
           const preview = expanded ? detailLines.join("\n  ") : `${detailLines.slice(0, 2).join("\n  ")}\n  ${theme.fg("dim", "… (Ctrl+O to view full diagnostic)")}`;
-          container.addChild(new Text(theme.fg("dim", `  ${preview}`), 0, 0));
+          container.addChild(new Text(theme.fg("dim", `  ↳ ${preview}`), 0, 0));
         }
         container.addChild({
           render(w: number) { return renderBottomStats(w); },
@@ -530,9 +557,8 @@ export default function subagentx(pi: ExtensionAPI) {
       }
 
       // 3. Success state
-      const doneHeader = `${theme.fg("success", "✓ Subagent Completed")} ${profileBadge}${model ? ` · ${theme.fg("dim", model)}` : ""}${elapsed ? ` · ${theme.fg("muted", elapsed)}` : ""}`;
-
       if (expanded) {
+        const doneHeader = `${theme.fg("success", "✔ Subagent Succeeded")} ${theme.fg("dim", "·")} ${profilePill(profile, theme)} ${model ? `· ${theme.fg("accent", model)} ` : ""}${theme.fg("dim", "·")} ${theme.fg("muted", elapsed)} ${theme.fg("dim", `· ${turns} turn${turns > 1 ? "s" : ""}`)}`;
         const container = new Container();
         container.addChild(new Text(doneHeader, 0, 0));
         container.addChild(new Spacer(1));
@@ -548,13 +574,15 @@ export default function subagentx(pi: ExtensionAPI) {
       }
 
       // Collapsed: neat 3-4 line report preview + stats line
+      const lines = text.split("\n").map((l: string) => l.trimEnd()).filter(Boolean);
+      const previewLines = lines.slice(0, 4);
+      const hidden = lines.length - previewLines.length;
+      const doneHeader = `${theme.fg("success", "✔ Completed")} ${theme.fg("dim", "·")} ${theme.fg("muted", elapsed)} ${theme.fg("dim", `· ${turns} turn${turns > 1 ? "s" : ""}`)} ${theme.fg("dim", `· (+${hidden > 0 ? hidden : 0} lines · Ctrl+O to expand)`)}`;
+
       const container = new Container();
       container.addChild(new Text(doneHeader, 0, 0));
       if (text) {
-        const lines = text.split("\n").map((l) => l.trimEnd()).filter(Boolean);
-        const previewLines = lines.slice(0, 4);
-        const hidden = lines.length - previewLines.length;
-        let previewText = previewLines.map((l) => theme.fg("toolOutput", `  ${l}`)).join("\n");
+        let previewText = previewLines.map((l: string) => theme.fg("toolOutput", `  ${l}`)).join("\n");
         if (hidden > 0) {
           previewText += `\n${theme.fg("dim", `  … (+${hidden} more lines · Ctrl+O to expand full report)`)}`;
         }
