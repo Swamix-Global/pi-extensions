@@ -14,6 +14,10 @@ const {
 	backoffMs,
 	formatDuration,
 	formatSnapshot,
+	composeStatusLine,
+	readLocalUsage,
+	formatLocalPill,
+	formatTokensCompact,
 	visibleWidth,
 	rightJustify,
 	detailReport,
@@ -174,39 +178,83 @@ test("formatDuration is compact and monotonic", () => {
 
 const FUTURE = Date.now() + 3600_000;
 
-test("formatSnapshot is dense quota-only: windows, resets, threshold colors", () => {
+test("formatSnapshot is dense quota-only: LED, windows, clock resets, urgency colors", () => {
 	const snap = {
 		kind: "codex",
 		plan: "pro",
 		primary: { pct: 42, resetsAtMs: FUTURE },
-		secondary: { pct: 12, resetsAtMs: Date.now() + 3 * 86400_000 },
+		secondary: { pct: 52, resetsAtMs: Date.now() + 3 * 86400_000 },
 		fetchedAtMs: 1,
 	};
 	const text = formatSnapshot(snap);
 	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
-	assert.match(plain, /^5h 42% ↻1h0m │ wk 12% ↻3d0h$/);
+	assert.match(plain, /^● 5h 42% 🕐1h0m │ 7d 52% 🕐3d0h$/);
 	assert.ok(!plain.includes("codex") && !plain.includes("luna"), "model/label stays out of the status");
-	assert.ok(text.includes("\u001b[38;2;110;200;130m"), "healthy window is green");
-	assert.ok(!text.includes("\u001b[38;2;255;90;90m"), "nothing red at 42%");
+	assert.ok(text.includes("\u001b[38;2;110;200;130m"), "42% remaining is green (calm ≥ 40)");
+	assert.ok(!text.includes("\u001b[38;2;255;170;60m"), "nothing amber at 42%");
 });
 
-test("formatSnapshot escalates color at 70 and 90 percent", () => {
+test("formatSnapshot grades urgency on REMAINING percent (green ≥40, amber 15–39, red <15)", () => {
 	const mk = (pct) => ({ kind: "zai", primary: { pct }, fetchedAtMs: 1 });
 	assert.ok(formatSnapshot(mk(69)).includes("\u001b[38;2;110;200;130m"));
-	assert.ok(formatSnapshot(mk(72)).includes("\u001b[38;2;255;170;60m"));
-	assert.ok(formatSnapshot(mk(95)).includes("\u001b[38;2;255;90;90m"));
+	assert.ok(formatSnapshot(mk(40)).includes("\u001b[38;2;110;200;130m"), "40 is calm");
+	assert.ok(formatSnapshot(mk(39)).includes("\u001b[38;2;255;170;60m"), "39 is tight");
+	assert.ok(formatSnapshot(mk(15)).includes("\u001b[38;2;255;170;60m"), "15 is still amber");
+	assert.ok(formatSnapshot(mk(14)).includes("\u001b[38;2;255;90;90m"), "14 is scarce");
+});
+
+/** Line LED tint = urgency tone of the WORST window (multi-factor summary). */
+test("health LED tint tracks the worst of both windows", () => {
+	const mk = (a, b) => ({ kind: "codex", primary: { pct: a }, secondary: { pct: b }, fetchedAtMs: 1 });
+	const calm = formatSnapshot(mk(90, 80));
+	assert.ok(calm.includes("●"), "LED present");
+	assert.ok(!calm.includes("\u001b[38;2;255;170;60m"), "80/90 stays green");
+	assert.ok(formatSnapshot(mk(90, 30)).includes("\u001b[38;2;255;170;60m"), "one tight window ambers the LED");
+	assert.ok(formatSnapshot(mk(95, 12)).includes("\u001b[38;2;255;90;90m"), "one scarce window reddens the LED");
+	assert.ok(!formatSnapshot({ kind: "codex", fetchedAtMs: 1 }).includes("●"), "no windows, no LED");
+});
+
+test("formatSnapshot renders parallel 5h/7d labels with fuel-gauge bars", () => {
+	const snap = { kind: "codex", primary: { pct: 95 }, secondary: { pct: 15 }, fetchedAtMs: 1 };
+	const text = formatSnapshot(snap, { bars: 5, resets: false });
+	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
+	assert.match(plain, /^● 5h █████ 95% │ 7d █░░░░ 15%$/);
+	assert.ok(!plain.includes("wk"), "weekly label is 7d (parallel durations)");
+	assert.ok(text.includes("█████"), "95% remaining fills the gauge");
+	assert.ok(text.includes("█░░░░"), "15% remaining drains the gauge");
+});
+
+test("density ladder is graded: bar cells step 6→5→4→3→0 before clocks drop", () => {
+	const snap = { kind: "codex", primary: { pct: 95, resetsAtMs: FUTURE }, secondary: { pct: 15, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
+	const bars = (d) => (formatSnapshot(snap, d).match(/█/g) ?? []).length / 2; // per window
+	assert.equal(bars({ bars: 6, resets: true }), 6);
+	assert.equal(bars({ bars: 5, resets: true }), 5);
+	assert.equal(bars({ bars: 4, resets: true }), 4);
+	assert.equal(bars({ bars: 3, resets: true }), 3);
+	const bare = formatSnapshot(snap, { bars: 0, resets: true }).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.ok(bare.includes("🕐") && !bare.includes("█"), "clocks outlast bars");
+	const noClocks = formatSnapshot(snap, { bars: 3, resets: false }).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.ok(noClocks.includes("█") && !noClocks.includes("🕐"), "bar+reset mix rung exists");
+});
+
+test("critical pulse: below 8% remaining the segment goes bold red", () => {
+	const mk = (pct) => ({ kind: "codex", primary: { pct }, fetchedAtMs: 1 });
+	assert.ok(formatSnapshot(mk(7)).includes("\u001b[1m"), "7% is bold");
+	assert.ok(formatSnapshot(mk(7)).includes("\u001b[38;2;255;90;90m"), "7% is red");
+	assert.ok(!formatSnapshot(mk(8)).includes("\u001b[1m"), "8% is red but not bold");
+	assert.ok(!formatSnapshot(mk(50)).includes("\u001b[1m"), "healthy never bold");
 });
 
 test("formatSnapshot placeholder, reset suppression, dense quota-only", () => {
 	const pending = formatSnapshot(undefined);
-	assert.match(pending.replace(/\u001b\[[0-9;]*m/g, ""), /^quota ⟳$/);
+	assert.match(pending.replace(/\u001b\[[0-9;]*m/g, ""), /^quota ⋯$/);
 	const snap = { kind: "codex", primary: { pct: 42, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
-	const bare = formatSnapshot(snap, false);
-	assert.equal(bare.replace(/\u001b\[[0-9;]*m/g, ""), "5h 42%");
+	const bare = formatSnapshot(snap, { bars: 0, resets: false });
+	assert.equal(bare.replace(/\u001b\[[0-9;]*m/g, ""), "● 5h 42%");
 });
 
 test("rightJustify pads with NBSP that survives footer sanitization", () => {
-	const text = "5h 42% │ wk 12%";
+	const text = "5h 42% │ 7d 12%";
 	const padded = rightJustify(text, 80);
 	const plain = padded.replace(/\u001b\[[0-9;]*m/g, "");
 	assert.equal(plain.length - text.length, 80 - text.length);
@@ -243,7 +291,7 @@ test("detailReport lists units, windows, resets, credits", () => {
 // ---------------------------------------------------------------------------
 
 test("QuotaPoller: unsupported provider clears status; report undefined", () => {
-	const p = new QuotaPoller(readConfig({}));
+	const p = new QuotaPoller(readConfig({}), NO_LOCAL);
 	let last = "sentinel";
 	p.retarget({ id: "deepseek-chat", provider: "deepseek" }, (t) => (last = t));
 	assert.equal(last, undefined);
@@ -251,19 +299,19 @@ test("QuotaPoller: unsupported provider clears status; report undefined", () => 
 });
 
 test("QuotaPoller: header harvest updates codex windows instantly", () => {
-	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }));
+	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }), NO_LOCAL);
 	let last = "sentinel";
 	p.retarget({ id: "gpt-6-luna", provider: "openai-codex" }, (t) => (last = t));
 	// Synchronous harvest before the (failing) auth refresh settles.
 	p.harvestHeaders({ "x-codex-primary-used-percent": "58", "x-codex-secondary-used-percent": "21" });
 	const plain = last.replace(/\u001b\[[0-9;]*m/g, "");
-	assert.match(plain, /5h 58%/);
-	assert.match(plain, /wk 21%/);
+	assert.match(plain, /5h .*58%/);
+	assert.match(plain, /7d .*21%/);
 	assert.ok(!plain.includes("gpt-6-luna"), "status stays quota-only after header harvest");
 });
 
 test("QuotaPoller: missing credential hides status and stops polling", async () => {
-	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }));
+	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }), NO_LOCAL);
 	let last = "sentinel";
 	p.retarget({ id: "glm-5.3", provider: "zai-coding-cn" }, (t) => (last = t));
 	await p.refresh(); // PI_QUOTA_HELPER_AUTH points nowhere -> AuthUnavailableError
@@ -277,7 +325,7 @@ test("QuotaPoller: missing credential hides status and stops polling", async () 
 });
 
 test("QuotaPoller: start/stop lifecycle renders then clears", async () => {
-	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }));
+	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }), NO_LOCAL);
 	const seen = [];
 	p.retarget({ id: "gpt-6-luna", provider: "openai-codex" }, (t) => seen.push(t));
 	p.start((t) => seen.push(t));
@@ -287,13 +335,107 @@ test("QuotaPoller: start/stop lifecycle renders then clears", async () => {
 });
 
 // Reference unused export guard (keeps import list honest if bundle changes).
-test("bundle keeps ANSI styling only (no width-widening glyphs in status)", () => {
+test("status glyph vocabulary is width-accounted (🕐/⚡ 2 cells, rest 1)", () => {
 	const snap = { kind: "codex", primary: { pct: 42, resetsAtMs: FUTURE }, secondary: { pct: 12 }, fetchedAtMs: 1 };
-	const text = formatSnapshot(snap);
-	const allowed = new Set(["│", "↻"]); // U+2502, U+21BB — narrow/ambiguous, 1 cell in western terminals
+	const text = formatSnapshot(snap, { bars: 5, resets: true }) + formatLocalPill(METER);
+	const widths = { "│": 1, "🕐": 2, "⚡": 2, "·": 1, "⋯": 1, "█": 1, "░": 1, "●": 1 };
 	for (const ch of text.replace(/\u001b\[[0-9;]*m/g, "")) {
 		const cp = ch.codePointAt(0);
-		assert.ok(cp < 0x7f || cp === 0xa0 || allowed.has(ch), `unexpected glyph: U+${cp.toString(16)}`);
+		if (cp < 0x7f || cp === 0xa0) continue;
+		assert.ok(ch in widths, `unexpected glyph: U+${cp.toString(16)}`);
+		assert.equal(visibleWidth(ch), widths[ch], `declared width for ${ch}`);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// local usage meter pill + full-line composition (pill left · quota right)
+// ---------------------------------------------------------------------------
+
+const NO_LOCAL = "/nonexistent-quota-helper-local-usage.json";
+const METER = { totalTokens: 15851571, totalRuns: 303 };
+const COMPOSE_SNAP = {
+	kind: "codex",
+	plan: "plus",
+	primary: { pct: 95, resetsAtMs: Date.now() + 3 * 3600_000 + 20 * 60_000 },
+	secondary: { pct: 15, resetsAtMs: Date.now() + 6 * 86400_000 + 22 * 3600_000 },
+	fetchedAtMs: 1,
+};
+
+test("formatTokensCompact renders human magnitudes", () => {
+	assert.equal(formatTokensCompact(999), "999");
+	assert.equal(formatTokensCompact(1000), "1k");
+	assert.equal(formatTokensCompact(812345), "812k");
+	assert.equal(formatTokensCompact(15851571), "15.9M");
+	assert.equal(formatTokensCompact(99_999_999), "100M");
+});
+
+test("readLocalUsage tolerates missing/corrupt/nonsense files", () => {
+	const file = `${process.env.TMPDIR ?? "/tmp"}/quota-helper-local-${process.pid}-${Math.random().toString(36).slice(2)}.json`;
+	fs.writeFileSync(file, JSON.stringify({ totalTokens: 15851571, totalRuns: 303 }));
+	assert.deepEqual(readLocalUsage(file), METER);
+	assert.equal(readLocalUsage(NO_LOCAL), undefined);
+	fs.writeFileSync(file, "{corrupt");
+	assert.equal(readLocalUsage(file), undefined);
+	fs.writeFileSync(file, JSON.stringify({ totalTokens: -5, totalRuns: 3 }));
+	assert.equal(readLocalUsage(file), undefined);
+	fs.writeFileSync(file, JSON.stringify({ totalTokens: 0, totalRuns: 0 }));
+	assert.equal(readLocalUsage(file), undefined);
+	fs.unlinkSync(file);
+});
+
+test("formatLocalPill is the left-side meter pill with exact widths", () => {
+	const pill = formatLocalPill(METER);
+	const plain = pill.replace(/\u001b\[[0-9;]*m/g, "");
+	assert.equal(plain, "[ ⚡ 15.9M · 303r ]");
+	assert.equal(visibleWidth(pill), 19);
+	assert.equal(visibleWidth(formatLocalPill({ totalTokens: 812345, totalRuns: 52 })), 17); // 812k · 52r
+	assert.ok(pill.includes("⚡"));
+});
+
+test("composeStatusLine: flush right at every width, meter pill on the left", () => {
+	for (const cols of [70, 85, 120]) {
+		const line = composeStatusLine(COMPOSE_SNAP, METER, cols);
+		assert.equal(visibleWidth(line), cols, `width ${cols}`);
+		const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
+		assert.ok(plain.startsWith("[ ⚡ 15.9M · 303r ]"), `pill leads at ${cols}`);
+		assert.ok(plain.trimEnd().endsWith("🕐6d22h"), `quota lands flush right at ${cols}`);
+	}
+});
+
+test("composeStatusLine is width-exact across the whole responsive range", () => {
+	for (let cols = 24; cols <= 160; cols++) {
+		const line = composeStatusLine(COMPOSE_SNAP, METER, cols);
+		assert.ok(visibleWidth(line) <= cols, `never exceeds ${cols}`);
+		assert.equal(visibleWidth(line), cols, `exact fit at ${cols}`);
+	}
+});
+
+test("composeStatusLine density ladder: bars 6→3 → resets → bar mix → percents → pill drop", () => {
+	const has = (cols, ch) => composeStatusLine(COMPOSE_SNAP, METER, cols).includes(ch);
+	assert.equal(has(120, "█"), true, "wide viewport gets full 6-cell gauges");
+	assert.equal(has(85, "█"), true);
+	assert.equal(has(70, "█"), true, "68 cells fits 70");
+	const resets = composeStatusLine(COMPOSE_SNAP, METER, 60).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.ok(resets.includes("🕐3h20m") && !resets.includes("█"), "60 cols keeps clocks, drops bars");
+	assert.ok(resets.startsWith("[ ⚡"), "pill survives at 60");
+	const mixed = composeStatusLine(COMPOSE_SNAP, METER, 50).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.ok(mixed.includes("█"), "50 cols keeps 3-cell bars");
+	assert.ok(!mixed.includes("🕐"), "50 cols drops clocks first");
+	assert.ok(mixed.startsWith("[ ⚡"), "pill survives at 50");
+	const tight = composeStatusLine(COMPOSE_SNAP, METER, 40).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.ok(tight.includes("5h 95%") && !tight.includes("🕐") && !tight.includes("█"), "40 cols keeps percents only");
+	assert.ok(tight.startsWith("[ ⚡"), "pill survives at 40");
+	const cramped = composeStatusLine(COMPOSE_SNAP, METER, 30);
+	assert.ok(!cramped.includes("⚡"), "pill sacrificed only when nothing fits beside it");
+	assert.equal(visibleWidth(cramped), 30);
+});
+
+test("composeStatusLine width matches pi-tui's own measurement exactly", async () => {
+	const { visibleWidth: piWidth } = await import("/usr/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/tui.js");
+	for (const cols of [70, 85, 120]) {
+		const line = composeStatusLine(COMPOSE_SNAP, METER, cols);
+		assert.equal(piWidth(line), cols, `pi-tui width at ${cols}`);
+		assert.equal(visibleWidth(line), piWidth(line), "our width table agrees with pi-tui");
 	}
 });
 
@@ -454,7 +596,7 @@ test("QuotaPoller: openai model renders via openai-codex fall-through (gpt-6.1-t
 	const realFetch = globalThis.fetch;
 	let n = 0;
 	globalThis.fetch = async () => (++n === 1 ? jsonResponse(401, unauthorized) : jsonResponse(200, whamPayload));
-	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }));
+	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }), NO_LOCAL);
 	let last = "sentinel";
 	p.retarget({ id: "gpt-6.1-terra", provider: "openai" }, (t) => (last = t));
 	await new Promise((r) => setTimeout(r, 10)); // drain retarget's own (unawaited, pre-swap) refresh
@@ -467,8 +609,8 @@ test("QuotaPoller: openai model renders via openai-codex fall-through (gpt-6.1-t
 		globalThis.fetch = realFetch;
 	}
 	const plain = last.replace(/\u001b\[[0-9;]*m/g, "");
-	assert.match(plain, /5h 95%/);
-	assert.match(plain, /wk 15%/);
+	assert.match(plain, /5h .*95%/);
+	assert.match(plain, /7d .*15%/);
 	assert.equal(n, 2, "both candidates were exercised");
 	p.stop();
 });

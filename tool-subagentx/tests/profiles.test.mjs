@@ -104,9 +104,9 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
   assert.ok(!partialRendered.includes('⏳'), 'no dedicated delegated-status line');
   assert.ok(partialRendered.includes('⚡ read src/index.ts'), 'parsed activity step rendered in ticker');
   assert.ok(partialRendered.includes('Comparing package manifests'), 'settled assistant text rendered at full opacity');
-  assert.ok(partialRendered.includes('Scanning re'), 'in-flight assistant line rendered');
+  assert.ok(!partialRendered.includes('Scanning re'), 'in-flight assistant line buffered, never rendered mid-flight');
   assert.ok(!partialRendered.includes('message_update'), 'raw child JSON never leaks into the ticker');
-  assert.ok(partialRendered.includes('[dim]'), 'newest activity line rendered in 50% fade dim');
+  assert.ok(!partialRendered.includes('[dim]Scanning'), 'no 50% fade dim on streaming text');
   const narrowPartial = partial.render(70).join('\n');
   assert.ok(narrowPartial.includes('RUNNING'), 'narrow viewport keeps the metrics line');
   assert.ok(!narrowPartial.includes('Ctrl+C aborts'), 'abort hint drops before clipping on narrow viewports');
@@ -269,7 +269,7 @@ test('ActivityFeed parses child NDJSON into polished transient steps (start/end 
   feed.push(events.slice(10, events.indexOf('"toolName":"read","durationMs"')));
 
   const mid = feed.snapshot();
-  assert.equal(mid.active, 'summary table', 'in-flight assistant text kept as the active 50%-fade line');
+  assert.equal(mid.active, 'summary table', 'in-flight assistant text kept buffered in the feed (never displayed)');
   assert.deepEqual(mid.lines, ['Building the'], 'settled text line flushed immediately on arrival');
 
   feed.push(events.slice(events.indexOf('"toolName":"read","durationMs"')));

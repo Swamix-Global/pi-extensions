@@ -49,6 +49,30 @@ export interface LocalUsageSummary {
 // Data directory override for hermetic concurrency tests.
 const dataDir = () => process.env.PI_SUBAGENTX_DATA_DIR || join(homedir(), ".pi", "agent");
 const LOCAL_USAGE_FILE = () => join(dataDir(), "subagentx-local-usage.json");
+
+// quota-helper (sibling extension) owns the footer status row while it is live:
+// it refreshes ~/.pi/agent/.quota-status-live on every render (30s poll cadence)
+// and unlinks the sentinel when it hides. While fresh, our plain-text meter twin
+// must stay silent — it would append after quota-helper's NBSP-padded line and
+// the footer's truncate ellipsis would eat into the flush-right quota tail.
+// Staleness TTL (2 min) self-heals after a crash without session_shutdown.
+const QUOTA_SENTINEL_FILE = () => join(dataDir(), ".quota-status-live");
+const QUOTA_SENTINEL_TTL_MS = 120_000;
+
+function quotaStatusLive(): boolean {
+	try {
+		return Date.now() - statSync(QUOTA_SENTINEL_FILE()).mtimeMs < QUOTA_SENTINEL_TTL_MS;
+	} catch {
+		return false;
+	}
+}
+
+type MeterStatusCtx = { ui?: { setStatus?: (key: string, text: string) => void } } | undefined | null;
+
+function setLocalMeterStatus(ctx: MeterStatusCtx, totalTokens: number): void {
+	if (quotaStatusLive()) return;
+	ctx?.ui?.setStatus?.("subagentx-local", `⚡ Local: ${formatTokens(totalTokens)} tok`);
+}
 const LEDGER_PATH = () => join(dataDir(), "subagentx-usage.jsonl");
 
 export function isLocalModel(model?: string | null, profile?: string | null): boolean {
@@ -305,7 +329,7 @@ function shortToolArgs(args: any): string {
 export interface ActivitySnapshot {
   /** Settled activity lines, oldest first, capped at the last 5. */
   lines: string[];
-  /** In-flight assistant text line, rendered with 50% fade. */
+  /** In-flight assistant text line. Buffered only — never rendered mid-flight. */
   active: string;
 }
 
@@ -313,8 +337,9 @@ export interface ActivitySnapshot {
  * Parses the child's NDJSON wire stream into polished, human-readable transient
  * activity. A tool's start/end event pair collapses into ONE settled line
  * (`✔ read src/index.ts · 410ms`), so the ticker shows discrete steps rather
- * than start/end echo pairs or raw JSON. Assistant prose streams into the
- * fading active line; the last 5 lines are retained newest-last.
+ * than start/end echo pairs or raw JSON. Assistant prose streams into an
+ * in-flight buffer that is never rendered: it settles into a line on newline
+ * or at stream end. The last 5 settled lines are retained newest-last.
  */
 export class ActivityFeed {
   private buf = "";
@@ -540,7 +565,7 @@ export default function subagentx(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const globalLocal = readGlobalLocalUsage();
     if (globalLocal.totalTokens > 0) {
-      ctx?.ui?.setStatus?.("subagentx-local", `⚡ Local: ${formatTokens(globalLocal.totalTokens)} tok`);
+      setLocalMeterStatus(ctx, globalLocal.totalTokens);
     }
   });
 
@@ -645,15 +670,15 @@ export default function subagentx(pi: ExtensionAPI) {
             const input = `Delegated task (literal text):\n${args.task}${turn ? "\nA previous provider attempt failed. Inspect existing state before repeating any side effects." : ""}`;
 
             // Parsed child activity: last 5 polished steps plus the in-flight
-            // text line. Completed steps flush immediately as they arrive;
-            // streaming text flushes by line or at most once per second.
+            // text line. Settled lines flush immediately as they arrive; the
+            // in-flight buffer is never displayed — it appears only once a
+            // newline or the stream end arrives.
             const feed = new ActivityFeed();
-            let lastFlush = 0;
-            let flushTimer: NodeJS.Timeout | null = null;
             const flushActivity = () => {
               const snap = feed.snapshot();
               details.activity = snap;
-              const latest = snap.active || snap.lines[snap.lines.length - 1] || "";
+              // Ticker preview publishes settled lines only, never the buffer.
+              const latest = snap.lines[snap.lines.length - 1] || "";
               if (latest) onUpdate?.(result(latest, { ...details, elapsedMs: Date.now() - started }));
             };
 
@@ -663,23 +688,11 @@ export default function subagentx(pi: ExtensionAPI) {
                 if (stream !== "stdout") return;
                 const settledBefore = feed.settledCount;
                 feed.push(chunk);
-                const now = Date.now();
-                if (feed.settledCount !== settledBefore) {
-                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-                  lastFlush = now;
-                  flushActivity();
-                } else if (feed.active && now - lastFlush >= 1000) {
-                  lastFlush = now;
-                  flushActivity();
-                } else if (feed.active && !flushTimer) {
-                  flushTimer = setTimeout(() => {
-                    flushTimer = null;
-                    flushActivity();
-                  }, Math.max(50, 1000 - (now - lastFlush)));
-                }
+                // Strict line buffering: flush only when a newline settles a
+                // line. No timers — word-by-word deltas stay invisible.
+                if (feed.settledCount !== settledBefore) flushActivity();
               },
             });
-            if (flushTimer) clearTimeout(flushTimer);
 
             const parsed = parseChildOutput(output.stdout);
             details.attempts.push({ model, code: output.code, error: output.error, usage: parsed.usage });
@@ -704,7 +717,7 @@ export default function subagentx(pi: ExtensionAPI) {
           durationMs: details.elapsedMs, usage: details.usage, taskChars: args.task?.length ?? 0 });
         const updatedLocal = recordLocalUsage(details.model ?? null, profile, ok, details.usage, details.elapsedMs);
         if (updatedLocal.totalTokens > 0) {
-          ctx?.ui?.setStatus?.("subagentx-local", `⚡ Local: ${formatTokens(updatedLocal.totalTokens)} tok`);
+          setLocalMeterStatus(ctx, updatedLocal.totalTokens);
         }
         signal?.removeEventListener("abort", abort);
         active.delete(controller);
@@ -817,8 +830,9 @@ export default function subagentx(pi: ExtensionAPI) {
       };
 
       // 1. Partial / Running state: spinner + RUNNING header, the parsed activity
-      // ticker (last 5 steps at full opacity), the in-flight line in 50% fade,
-      // then the aggregate metrics dashboard. No per-turn intermediate noise.
+      // ticker (last 5 settled lines), then the aggregate metrics dashboard.
+      // In-flight text is buffered only — it appears once a newline arrives or
+      // the stream ends. No per-turn intermediate noise.
       if (isPartial) {
         return {
           render(width: number): string[] {
@@ -830,9 +844,6 @@ export default function subagentx(pi: ExtensionAPI) {
             const ticker: string[] = [];
             for (const ln of (act?.lines ?? []).slice(-5)) {
               ticker.push(fitVisible(theme.fg("toolOutput", `  ${String(ln)}`), width));
-            }
-            if (act?.active) {
-              ticker.push(theme.fg("dim", fitVisible(`  ${String(act.active)}`, width)));
             }
             return [top, ...ticker, ...renderBottomStats(width)];
           },

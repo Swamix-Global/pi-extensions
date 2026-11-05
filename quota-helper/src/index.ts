@@ -3,7 +3,7 @@
  *
  * Tracks the currently selected model's provider and smart-polls only that
  * provider's usage endpoint every 30s (configurable), rendering a dense,
- * right-justified, quota-only readout:  `5h 42% ↻1h12m │ wk 12% ↻3d4h`
+ * right-justified, quota-only readout:  `● 5h 42% 🕐1h12m │ 7d 12% 🕐3d4h`
  * (the model name is redundant — the footer already shows it on the left).
  *
  * Adapters:
@@ -23,10 +23,28 @@
  *     unit 3 rows are the 5h window, unit 6 rows the weekly window; plan from
  *     data.level. Host: open.bigmodel.cn for *cn* or bigmodel ids, else api.z.ai.
  *
+ * Status line ownership: quota-helper composes the whole extension status row —
+ * the persistent subagentx local-usage pill on the LEFT (`[ ⚡ 15.9M · 303r ]`,
+ * read live from ~/.pi/agent/subagentx-local-usage.json) and the dense quota
+ * readout flush RIGHT. pi joins extension statuses alphabetically by key and
+ * truncates the tail at terminal width, so this padded line (key `quota-helper`
+ * sorts first) absorbs subagentx's own plain-text meter twin invisibly; if
+ * quota-helper ever hides (auth rejected / unsupported provider), the twin
+ * resurfaces untouched and the meter never disappears. A graded density
+ * ladder picks the widest variant that fits the remaining width: fuel-gauge
+ * bars at 6/5/4/3 cells with clock resets
+ * (`● 5h ██████ 95% 🕐3h20m │ 7d █░░░░░ 15% 🕐6d22h`), then resets-only,
+ * then bar+reset mixes, then percents-only; the meter pill is sacrificed
+ * first. Multi-factor health is summarized by a line LED (`●`, tinted by the
+ * WORST window) plus per-window urgency grading on remaining percent:
+ * green ≥ 40%, amber 15–39%, red < 15% — below 8% the whole segment goes
+ * bold red (the terminal-safe critical pulse).
+ *
  * Rendering uses non-breaking-space padding: pi's footer sanitizes statuses by
  * collapsing ASCII runs, so NBSP is the only padding that survives and still
- * occupies one terminal cell — the status line is right-justified to the exact
- * terminal width and recomputed on resize.
+ * occupies one terminal cell — the line lands flush right and is recomputed on
+ * resize. Width accounting is grapheme-aware and matches pi-tui exactly for the
+ * emitted glyph vocabulary: 🕐/⚡ are 2 cells (RGI emoji), █ ░ │ · ⋯ ● are 1.
  *
  * Smart polling: one provider at a time, in-flight guard, exponential backoff on
  * failures (30s → 5min cap, reset on success), silent hide on auth rejection,
@@ -358,20 +376,53 @@ async function fetchZaiUsage(spec: AdapterSpec, cred: Credential): Promise<Quota
 
 const ANSI = /\u001b\[[0-9;]*m/g;
 
+/** Wide-glyph ranges in the emoji vocabulary this extension emits. Only RGI
+ * emoji (2 cells in pi-tui) fall inside; █ ░ │ · ⋯ deliberately do not. */
+const WIDE_RANGES: Array<[number, number]> = [
+	[0x26a0, 0x27bf], // ⚡ and friends (emoji-presentation)
+	[0x1f1e6, 0x1f1ff], // regional indicators
+	[0x1f300, 0x1faff], // 🕐 and the pictographic blocks
+];
+
+function glyphWidth(cp: number): number {
+	return WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1;
+}
+
+/** Terminal-cell width of `text` after stripping SGR escapes. Iterates code
+ * points (not UTF-16 units) and applies the wide-range table, matching pi-tui's
+ * grapheme measurement for every glyph this extension emits. */
 export function visibleWidth(text: string): number {
-	return text.replace(ANSI, "").length;
+	let w = 0;
+	for (const ch of text.replace(ANSI, "")) w += glyphWidth(ch.codePointAt(0)!);
+	return w;
 }
 
 const GRAY = "\u001b[38;2;130;140;150m";
 const GREEN = "\u001b[38;2;110;200;130m";
 const ORANGE = "\u001b[38;2;255;170;60m";
 const RED = "\u001b[38;2;255;90;90m";
+const ACCENT = "\u001b[38;2;96;190;255m";
+const BOLD = "\u001b[1m";
 const RESET = "\u001b[0m";
 
-function pctColor(pct: number): string {
-	if (pct >= 90) return RED;
-	if (pct >= 70) return ORANGE;
-	return GREEN;
+/** Urgency grading on REMAINING percent, shared by each window segment and
+ * the line LED: calm ≥ 40%, tight 15–39%, scarce < 15%; below 8% the tone
+ * runs bold (the terminal-safe critical pulse). */
+function urgencyTone(pct: number): { color: string; bold: string } {
+	if (pct < 15) return { color: RED, bold: pct < 8 ? BOLD : "" };
+	if (pct < 40) return { color: ORANGE, bold: "" };
+	return { color: GREEN, bold: "" };
+}
+
+/** Line LED summarizing both windows at a glance: tinted by the WORST
+ * remaining percent. Rendered as a 2-cell `● ` prefix on the quota run. */
+function healthDot(snap: QuotaSnapshot | undefined): string {
+	const pcts = [snap?.primary?.pct, snap?.secondary?.pct].filter(
+		(p): p is number => typeof p === "number",
+	);
+	if (pcts.length === 0) return "";
+	const tone = urgencyTone(Math.min(...pcts));
+	return `${tone.bold}${tone.color}●${RESET} `;
 }
 
 /** Compact relative duration: "45s", "12m", "1h12m", "3d4h". */
@@ -387,26 +438,60 @@ export function formatDuration(ms: number): string {
 	return `${d}d${h % 24}h`;
 }
 
-function windowText(tag: string, w: QuotaWindow, showResets: boolean): string {
+/** Fuel gauge at `cells` columns: █ filled / ░ empty, proportional to
+ * REMAINING pct — the bar drains as quota is consumed, exactly like the
+ * number beside it. Cell count comes from the density ladder. */
+function barFor(pct: number, cells: number): string {
+	const filled = Math.min(cells, Math.max(0, Math.round((pct / 100) * cells)));
+	return "█".repeat(filled) + "░".repeat(cells - filled);
+}
+
+function windowText(tag: string, w: QuotaWindow, bars: number, resets: boolean): string {
 	const pct = Math.round(w.pct);
-	let text = `${pctColor(w.pct)}${tag} ${pct}%${RESET}`;
-	if (showResets && w.resetsAtMs) {
+	// one cohesive color run: label + gauge + percent share the urgency tone;
+	// below 8% remaining the whole segment goes bold (critical pulse).
+	const tone = urgencyTone(w.pct);
+	let text = `${tone.bold}${tone.color}${tag} `;
+	if (bars > 0) text += `${barFor(w.pct, bars)} `;
+	text += `${pct}%${RESET}`;
+	if (resets && w.resetsAtMs) {
 		const left = formatDuration(w.resetsAtMs - Date.now());
-		if (left) text += `${GRAY} ↻${left}${RESET}`;
+		if (left) text += `${GRAY} 🕐${left}${RESET}`;
 	}
 	return text;
 }
 
-/** One-line status text for the footer: dense quota-only readout
- * `5h 42% ↻1h12m │ wk 12% ↻3d4h`. The model name is deliberately omitted —
- * the footer's left side already shows it. ANSI styled; single-width glyphs. */
-export function formatSnapshot(snap: QuotaSnapshot | undefined, showResets = true): string {
-	if (!snap) return `${GRAY}quota ⟳${RESET}`;
+/** Responsive density ladder, widest first. Clocks are the non-redundant
+ * info (the % already implies fill) so bars thin out 6→5→4→3 and drop
+ * entirely before the clock resets do; percents-only is the final rung. */
+export interface DensityConfig {
+	bars: number;
+	resets: boolean;
+}
+
+const DENSITY_LADDER: readonly DensityConfig[] = [
+	{ bars: 6, resets: true },
+	{ bars: 5, resets: true },
+	{ bars: 4, resets: true },
+	{ bars: 3, resets: true },
+	{ bars: 0, resets: true },
+	{ bars: 3, resets: false },
+	{ bars: 0, resets: false },
+];
+
+/** One-line quota readout for the footer: dense quota-only, health LED, clock
+ * resets. `● 5h ██████ 95% 🕐3h20m │ 7d █░░░░░ 15% 🕐6d22h` (full density) down
+ * to `5h 95% │ 7d 15%` (percents-only). Labels stay parallel (`5h` / `7d`,
+ * both durations); the model name is deliberately omitted — the footer's left
+ * side already shows it. */
+export function formatSnapshot(snap: QuotaSnapshot | undefined, density: DensityConfig = { bars: 0, resets: true }): string {
+	if (!snap) return `${GRAY}quota ⋯${RESET}`;
 	const sep = `${GRAY} │ ${RESET}`;
 	const parts: string[] = [];
-	if (snap.primary) parts.push(windowText("5h", snap.primary, showResets));
-	if (snap.secondary) parts.push(windowText("wk", snap.secondary, showResets));
-	return parts.length > 0 ? parts.join(sep) : `${GRAY}quota ⟳${RESET}`;
+	if (snap.primary) parts.push(windowText("5h", snap.primary, density.bars, density.resets));
+	if (snap.secondary) parts.push(windowText("7d", snap.secondary, density.bars, density.resets));
+	const body = parts.length > 0 ? parts.join(sep) : `${GRAY}quota ⋯${RESET}`;
+	return healthDot(snap) + body;
 }
 
 /** Right-justify by padding with NBSP. pi's footer runs trim() on every status
@@ -418,8 +503,76 @@ export function rightJustify(text: string, columns: number): string {
 	return pad > 0 ? RESET + "\u00a0".repeat(pad) + text : text;
 }
 
+// ---------------------------------------------------------------------------
+// local usage meter (left pill) — persistent subagentx global counter
+// ---------------------------------------------------------------------------
+
+export interface LocalUsage {
+	totalTokens: number;
+	totalRuns: number;
+}
+
+/** Read the persistent subagentx local-usage counter; tolerant of missing or
+ * corrupt files — the pill is decoration and must never break the status. */
+export function readLocalUsage(file: string): LocalUsage | undefined {
+	try {
+		const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<LocalUsage> | null;
+		const tokens = Number(raw?.totalTokens);
+		const runs = Number(raw?.totalRuns);
+		if (!Number.isFinite(tokens) || !Number.isFinite(runs) || tokens <= 0 || runs < 0) return undefined;
+		return { totalTokens: tokens, totalRuns: Math.round(runs) };
+	} catch {
+		return undefined;
+	}
+}
+
+/** 15851571 → "15.9M", 812345 → "812k", 999 → "999". */
+export function formatTokensCompact(n: number): string {
+	if (n < 1000) return `${n}`;
+	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+	if (n < 100_000_000) return `${Number((n / 1_000_000).toFixed(1))}M`;
+	return `${Math.round(n / 1_000_000)}M`;
+}
+
+/** Left pill: `[ ⚡ 15.9M · 303r ]` — lifetime local-model usage, exactly 19
+ * cells for typical values. All glyphs width-accounted: ⚡ is 2 cells. */
+export function formatLocalPill(u: LocalUsage): string {
+	return `${GRAY}[${RESET} ${ACCENT}⚡${RESET} ${BOLD}${formatTokensCompact(u.totalTokens)}${RESET} ${GRAY}· ${u.totalRuns}r${RESET} ${GRAY}]${RESET}`;
+}
+
+// ---------------------------------------------------------------------------
+// status line composition (pill left · NBSP gap · quota flush right)
+// ---------------------------------------------------------------------------
+
+/** Compose the full status row: meter pill on the LEFT, quota flush RIGHT,
+ * NBSP-padded to exactly `columns` cells. The density ladder walks widest →
+ * narrowest; the widest variant that still fits after the pill wins, the pill
+ * is dropped only when nothing fits beside it, and the composition is
+ * width-exact at every step (never wraps, never truncates in real terms). */
+export function composeStatusLine(
+	snap: QuotaSnapshot | undefined,
+	meter: LocalUsage | undefined,
+	columns: number,
+	showResets = true,
+): string {
+	const pill = meter ? formatLocalPill(meter) : "";
+	const pillW = pill ? visibleWidth(pill) : 0;
+	const ladder = (showResets ? DENSITY_LADDER : DENSITY_LADDER.map(d => ({ ...d, resets: false }))).map(d =>
+		formatSnapshot(snap, d),
+	);
+	if (pill) {
+		const beside = ladder.find(q => pillW + 2 + visibleWidth(q) <= columns);
+		if (beside !== undefined) {
+			const pad = columns - pillW - visibleWidth(beside);
+			return pill + RESET + "\u00a0".repeat(pad) + beside;
+		}
+	}
+	const bare = ladder.find(q => visibleWidth(q) <= columns) ?? `${GRAY}quota ⋯${RESET}`;
+	return rightJustify(bare, columns);
+}
+
 /** Multi-line detail report for /quota. */
-export function detailReport(spec: AdapterSpec, modelId: string, snap: QuotaSnapshot | undefined): string {
+export function detailReport(spec: AdapterSpec, modelId: string, snap: QuotaSnapshot | undefined, meter?: LocalUsage): string {
 	const head = `${spec.label} · ${modelId}${snap?.plan ? ` · plan ${snap.plan}` : ""}${snap?.source ? ` · via ${snap.source}` : ""}`;
 	if (!snap) return `${head}\nno quota data yet`;
 	const lines = [head];
@@ -434,6 +587,7 @@ export function detailReport(spec: AdapterSpec, modelId: string, snap: QuotaSnap
 	row("5h window", snap.primary);
 	row("weekly", snap.secondary);
 	if (snap.credits) lines.push(`credits: ${snap.credits}`);
+	if (meter) lines.push(`local meter: ${formatTokensCompact(meter.totalTokens)} tokens · ${meter.totalRuns} runs (persistent)`);
 	return lines.join("\n");
 }
 
@@ -467,6 +621,7 @@ export function backoffMs(intervalMs: number, consecutiveFailures: number): numb
 }
 
 export class QuotaPoller {
+	private readonly localUsageFile: string;
 	private spec: AdapterSpec | undefined;
 	private family = ""; // kind:host — stable across openai↔openai-codex model switches
 	private modelId = "";
@@ -479,7 +634,9 @@ export class QuotaPoller {
 	private sink: StatusSink | undefined;
 	private onResize = () => this.render();
 
-	constructor(private readonly cfg: QuotaConfig) {}
+	constructor(private readonly cfg: QuotaConfig, localUsageFile?: string) {
+		this.localUsageFile = localUsageFile ?? path.join(agentDir(), "subagentx-local-usage.json");
+	}
 
 	/** Re-target the active provider/model; refreshes immediately when the quota
 	 * family (adapter kind + host) changed — openai↔openai-codex share windows. */
@@ -586,13 +743,13 @@ export class QuotaPoller {
 			this.sink(undefined);
 			return;
 		}
-		const text = formatSnapshot(this.snapshot, this.cfg.showResets);
 		const cols = process.stdout.columns ?? 80;
-		this.sink(rightJustify(text, cols));
+		this.sink(composeStatusLine(this.snapshot, readLocalUsage(this.localUsageFile), cols, this.cfg.showResets));
 	}
 
 	report(): string | undefined {
-		return this.spec ? detailReport(this.spec, this.modelId, this.snapshot) : undefined;
+		if (!this.spec) return undefined;
+		return detailReport(this.spec, this.modelId, this.snapshot, readLocalUsage(this.localUsageFile));
 	}
 }
 
@@ -601,6 +758,23 @@ export class QuotaPoller {
 // ---------------------------------------------------------------------------
 
 const STATUS_KEY = "quota-helper";
+
+const SENTINEL_FILE = () => path.join(agentDir(), ".quota-status-live");
+
+/** Claim the shared footer status row for the next ~2 min: sibling subagentx
+ * checks this sentinel's freshness and withholds its plain-text meter twin,
+ * which would otherwise append after the padded line and put the footer's
+ * truncate ellipsis over the flush-right quota tail. Refreshed on every render
+ * (30s poll cadence), removed when the status clears — after a crash without
+ * session_shutdown the twin resurfaces within 2 minutes. */
+function claimStatusLine(active: boolean): void {
+	try {
+		if (active) fs.writeFileSync(SENTINEL_FILE(), String(process.pid));
+		else fs.unlinkSync(SENTINEL_FILE());
+	} catch {
+		/* decoration only — never break the status */
+	}
+}
 
 export default function quotaHelper(pi: ExtensionAPI): void {
 	const cfg = readConfig(readExtensionSettings("quotaHelper"));
@@ -611,7 +785,10 @@ export default function quotaHelper(pi: ExtensionAPI): void {
 
 	const bind = (ctx: ExtensionContext): StatusSink | undefined => {
 		if (typeof ctx.ui?.setStatus !== "function") return undefined;
-		return (text) => ctx.ui.setStatus(STATUS_KEY, text);
+		return (text) => {
+			claimStatusLine(text !== undefined);
+			ctx.ui.setStatus!(STATUS_KEY, text);
+		};
 	};
 
 	pi.on("session_start", (_event, ctx) => {
