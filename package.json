@@ -11,7 +11,8 @@
     "tool-search",
     "tool-subagentx",
     "util-compaction",
-    "quota-helper"
+    "quota-helper",
+    "util-frankenstein"
   ],
   "scripts": {
     "build": "bash scripts/build-all.sh",

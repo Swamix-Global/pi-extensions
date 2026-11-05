@@ -1,0 +1,25 @@
+{
+  "name": "@sgai/pi-util-frankenstein",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Util-frankenstein: opt‑in virtual model frankenstein that selects openai‑codex/gpt‑6‑astra (high) then openai‑codex/gpt‑6‑luna (max) up to two times per inference, preserving tool continuations across user turns and native virtual routing.",
+  "keywords": [
+    "virtual-model",
+    "frankenstein",
+    "openai-codex",
+    "gpt-6-astra",
+    "gpt-6-luna"
+  ],
+  "pi": {
+    "extensions": [
+      "build/util-frankenstein.js"
+    ]
+  },
+  "scripts": {
+    "build": "bash ../../scripts/build-extension.sh util-frankenstein"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
