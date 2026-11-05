@@ -123,81 +123,6 @@ function yamlSplitKey(rest: string): { key: string; value: string } | undefined 
 	return undefined;
 }
 
-const BARE_YAML_KEY = /^((?:"[^"]*"|'[^']*'|[A-Za-z_][\w.-]*):)(\s*)([\s\S]*)$/;
-const BARE_YAML_BLOCK_SCALAR = /^[|>][-+]?\s*(#.*)?$/;
-// Tokens that only open a statement or expression in source code.
-const BARE_YAML_CODE_START =
-	/^(?:def|class|function|async|await|const|let|var|import|from|export|return|if|elif|else|for|while|switch|case|try|catch|finally|raise|assert|yield|except|public|private|protected|static|namespace|typedef|#include|#define|template|}\s*$)/;
-const BARE_YAML_CODE_END = /[\w)\]"']\s*;(#.*)?$/;
-
-/**
- * Detect an unfenced YAML document so tool results that return bare YAML (the
- * evidence engine, query tools) still get a box and token colors. The test is
- * structural, not statistical: every content line must be a `key:`, a `-` item, a
- * comment, a document marker, or the body of a `|`/`>` block scalar, and at least two
- * keys must appear. Markdown markers (fences, headings, tables, blockquotes) and
- * lines that only occur in source code (def/class/function, assignments, `;`) veto
- * the whole block. Measured against 842 recorded tool outputs: every evidence packet
- * is boxed, no code dump or prose paragraph is.
- */
-export function looksLikeBareYaml(text: string): boolean {
-	const raw = text.trim();
-	if (!raw || raw.length < 24) return false;
-	if (/^```|^~~~/.test(raw)) return false;
-	if (/(^|\n)\s*(```|~~~)/.test(raw)) return false;
-	if (/"""|'''/.test(raw)) return false;
-	// Markdown tables, blockquotes and headings are prose, not YAML.
-	if (/(^|\n)\s*[|>](\s|$)/.test(raw)) return false;
-	if (/(^|\n)#{1,6}\s/.test(raw)) return false;
-
-	let keys = 0;
-	let structural = 0;
-	let considered = 0;
-	let blockIndent = -1;
-	for (const line of raw.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		// Interleaved notes from other extensions stay ignorable.
-		if (/^[…]/.test(trimmed) || /^\[\(\[]/.test(trimmed) || /^\.\.\. \[/.test(trimmed)) continue;
-		const indent = line.length - line.trimStart().length;
-		if (blockIndent >= 0) {
-			if (indent >= blockIndent) {
-				considered++;
-				structural++;
-				continue;
-			}
-			blockIndent = -1;
-		}
-		considered++;
-		const body = trimmed.replace(/^-\s+/, "");
-		const key = BARE_YAML_KEY.exec(body);
-		const quotedValue = key ? /^["']/.test(key[3]) : false;
-		// Code that YAML would only carry inside a quoted scalar vetoes the block.
-		if (!quotedValue) {
-			const code = (key ? key[3] : trimmed).trimStart();
-			if (BARE_YAML_CODE_START.test(code) || BARE_YAML_CODE_END.test(code)) return false;
-			if (/^[\w.$]+\s*=\s*[^\s=]/.test(code)) return false;
-		}
-		if (/^(---|\.\.\.)$/.test(trimmed) || /^#/.test(trimmed)) {
-			structural++;
-			continue;
-		}
-		if (key) {
-			keys++;
-			structural++;
-			if (BARE_YAML_BLOCK_SCALAR.test(key[3])) blockIndent = indent + 1;
-			continue;
-		}
-		if (/^-(\s|$)/.test(trimmed)) {
-			structural++;
-			if (BARE_YAML_BLOCK_SCALAR.test(trimmed.slice(2).trimStart())) blockIndent = indent + 1;
-		}
-	}
-	if (considered < 3 || keys < 2) return false;
-	if (keys / considered < 0.2) return false;
-	return structural / considered >= 0.85;
-}
-
 /** Color a value segment: flow collections, quoted strings, scalars, trailing comments. */
 function yamlValue(value: string): string {
 	let out = "";
@@ -313,8 +238,6 @@ function formatCodeBlock(lines: string[], lang: string, availableWidth?: number)
 export function formatMarkdown(markdown: string, ctx: { messageType?: string; availableWidth?: number } = {}): string {
 	if (!markdown) return "";
 	if (ctx?.messageType === "assistant-thinking") return markdown;
-	// Bare YAML tool output has no fence; give it one so it renders boxed and colored.
-	if (looksLikeBareYaml(markdown)) markdown = `\u0060\u0060\u0060yaml\n${markdown.trim()}\n\u0060\u0060\u0060`;
 	const { availableWidth } = ctx;
 
 	const lines = markdown.split("\n");
@@ -379,6 +302,17 @@ export function formatMarkdown(markdown: string, ctx: { messageType?: string; av
 	if (inCodeBlock) {
 		const boxed = formatCodeBlock(codeBlockLines, codeBlockLang, availableWidth);
 		result.push(boxed);
+	}
+
+	// When streaming, the active newest line is shown with 50% fade (dim); settled lines stay full opacity
+	if (ctx?.isStreaming && result.length > 0) {
+		for (let idx = result.length - 1; idx >= 0; idx--) {
+			if (result[idx].trim().length > 0) {
+				const active = result[idx];
+				result[idx] = `${ANSI.dim}${active}${ANSI.reset}`;
+				break;
+			}
+		}
 	}
 
 	return result.join("\n");

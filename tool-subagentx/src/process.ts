@@ -36,6 +36,7 @@ export function runProcess(options: {
   command: string; args: string[]; input: string; cwd: string;
   env?: NodeJS.ProcessEnv; signal?: AbortSignal; timeoutMs?: number;
   maxBytes?: number; graceMs?: number;
+  onStream?: (chunk: string, stream: "stdout" | "stderr") => void;
 }): Promise<ProcessResult> {
   if (options.signal?.aborted) return Promise.resolve({ stdout: "", stderr: "", code: null, error: "cancelled" });
   return new Promise((resolve) => {
@@ -98,6 +99,9 @@ export function runProcess(options: {
         stderrChunks.push(data);
         stderrBytes += data.length;
       }
+      try {
+        options.onStream?.(data.toString("utf8"), stream);
+      } catch {}
     };
     child.stdout.on("data", (data) => collect("stdout", data));
     child.stderr.on("data", (data) => collect("stderr", data));

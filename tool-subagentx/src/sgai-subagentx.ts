@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -282,6 +282,62 @@ export function fitVisible(str: string, maxCols: number): string {
   return `${cur}…`;
 }
 
+export const taskTldrCache = new Map<string, string>();
+
+export function extractiveTldr(task: string): string {
+  const clean = task.trim().replace(/^#+\s*/, "").replace(/[`*]/g, "");
+  const firstLine = clean.split("\n").map((l) => l.trim()).filter(Boolean)[0] || clean;
+  const sentence = firstLine.split(/[.;?!]/)[0]?.trim() || firstLine;
+  return sentence.length > 80 ? `${sentence.slice(0, 77)}…` : sentence;
+}
+
+export async function fetchModelTldr(task: string, profile: Profile, modelOverride?: string): Promise<string> {
+  const cached = taskTldrCache.get(task);
+  if (cached) return cached;
+
+  const wordCount = task.trim().split(/\s+/).length;
+  if (wordCount <= 10) {
+    taskTldrCache.set(task, task.trim());
+    return task.trim();
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1800);
+    const resp = await fetch("http://127.0.0.1:30000/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "lfm3-1.7b-fp8",
+        chat_template_kwargs: { enable_thinking: false },
+        messages: [
+          {
+            role: "user",
+            content: `Summarize this task into a single concise action sentence under 12 words:\n${task}`,
+          },
+        ],
+        max_tokens: 35,
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data = (await resp.json()) as any;
+      const raw = (data?.choices?.[0]?.message?.content || data?.choices?.[0]?.message?.reasoning_content || "").trim();
+      const clean = raw.replace(/^[-*•"']\s*/, "").replace(/["']$/g, "").trim();
+      if (clean && clean.length > 3) {
+        taskTldrCache.set(task, clean);
+        return clean;
+      }
+    }
+  } catch {}
+
+  const fallback = extractiveTldr(task);
+  taskTldrCache.set(task, fallback);
+  return fallback;
+}
+
 export default function subagentx(pi: ExtensionAPI) {
   let cursor = 0;
   const active = new Set<AbortController>();
@@ -367,6 +423,9 @@ export default function subagentx(pi: ExtensionAPI) {
       if (args.timeout_seconds !== undefined && (!Number.isInteger(args.timeout_seconds) || args.timeout_seconds < 1)) {
         return result("Invalid timeout_seconds: must be a positive integer.", details, true);
       }
+      if (args.task) {
+        fetchModelTldr(args.task, profile, args.model).catch(() => {});
+      }
       const controller = new AbortController();
       const abort = () => controller.abort();
       signal?.addEventListener("abort", abort, { once: true });
@@ -394,7 +453,46 @@ export default function subagentx(pi: ExtensionAPI) {
             const call = invocation(childArgs(profile, model, getReasoning(model, settings)));
             const env = { ...process.env, PI_SUBAGENTX_CHILD: "1", RIPGREP_CONFIG_PATH: "" };
             const input = `Delegated task (literal text):\n${args.task}${turn ? "\nA previous provider attempt failed. Inspect existing state before repeating any side effects." : ""}`;
-            const output = await runProcess({ ...call, cwd: ctx.cwd, env, input, signal: controller.signal, timeoutMs: remaining });
+
+            let streamBuf = "";
+            let streamLastFlush = Date.now();
+            let streamLineCount = 0;
+            let streamTimer: NodeJS.Timeout | null = null;
+
+            const flushStream = () => {
+              if (!streamBuf.trim()) return;
+              const lines = streamBuf.split("\n").map((l: string) => l.trim()).filter(Boolean);
+              const lastLine = lines[lines.length - 1];
+              if (lastLine) {
+                onUpdate?.(result(lastLine, { ...details, elapsedMs: Date.now() - started }));
+              }
+            };
+
+            const output = await runProcess({
+              ...call, cwd: ctx.cwd, env, input, signal: controller.signal, timeoutMs: remaining,
+              onStream: (chunk, stream) => {
+                if (stream !== "stdout") return;
+                streamBuf += chunk;
+                const now = Date.now();
+                const curCount = (streamBuf.match(/\n/g) || []).length;
+                const isNewLine = curCount > streamLineCount;
+                const isTimeUp = now - streamLastFlush >= 1000;
+                if (isNewLine || isTimeUp) {
+                  if (streamTimer) { clearTimeout(streamTimer); streamTimer = null; }
+                  streamLineCount = curCount;
+                  streamLastFlush = now;
+                  flushStream();
+                } else if (!streamTimer) {
+                  streamTimer = setTimeout(() => {
+                    streamLastFlush = Date.now();
+                    streamTimer = null;
+                    flushStream();
+                  }, Math.max(50, 1000 - (now - streamLastFlush)));
+                }
+              },
+            });
+            if (streamTimer) clearTimeout(streamTimer);
+
             const parsed = parseChildOutput(output.stdout);
             details.attempts.push({ model, code: output.code, error: output.error, usage: parsed.usage });
             const failed = output.error || output.code !== 0 || !parsed.text.trim();
@@ -443,22 +541,32 @@ export default function subagentx(pi: ExtensionAPI) {
           if (!task) return [header];
 
           if (isExpanded) {
-            const lines = task.split("\n").map((l) => theme.fg("dim", `  ${l}`));
+            // Full raw task wrapped to width, styled in BOLD
+            const maxW = Math.max(20, width - 4);
+            const wrapped = wrapTextWithAnsi(task, maxW);
+            const lines = wrapped.map((l) => `  ${theme.bold(l)}`);
             return [header, ...lines];
           }
 
-          // Collapsed: budget single line preview strictly against available terminal width
-          const lines = task.split("\n").map((l) => l.trim()).filter(Boolean);
-          const first = lines[0] ?? "";
+          // Collapsed: model-generated task TLDR with word count badge
+          let tldr = taskTldrCache.get(task);
+          if (!tldr) {
+            tldr = extractiveTldr(task);
+            fetchModelTldr(task, profile, args?.model).then((res) => {
+              if (res && res !== tldr) {
+                context?.invalidate?.();
+              }
+            });
+          }
           const wordCount = task.split(/\s+/).length;
           const wordBadge = ` (${wordCount}w)`;
           const badgeVisual = visibleWidth(wordBadge);
-          const avail = Math.max(15, width - 4 - badgeVisual);
-          const snippet = fitVisible(first, avail);
+          const avail = Math.max(15, width - 6 - badgeVisual);
+          const snippet = fitVisible(tldr, avail);
 
           return [
             header,
-            `  ${theme.fg("toolOutput", snippet)}${theme.fg("muted", wordBadge)}`,
+            `  ${theme.fg("accent", "✦")} ${theme.fg("toolOutput", snippet)}${theme.fg("muted", wordBadge)}`,
           ];
         },
         invalidate() {},
@@ -527,7 +635,8 @@ export default function subagentx(pi: ExtensionAPI) {
               const last = clean[clean.length - 1];
               if (last) {
                 const avail = Math.max(10, width - 6);
-                outLines.push(`  ${theme.fg("dim", "↳")} ${theme.fg("toolOutput", fitVisible(last, avail))}`);
+                // 50% fade for the active streaming line
+                outLines.push(`  ${theme.fg("dim", "↳")} ${theme.fg("dim", fitVisible(last, avail))}`);
               }
             }
             return outLines;

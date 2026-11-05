@@ -90,10 +90,12 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
   const callExpanded = tool.renderCall({ profile: 'explorer', task: longTask }, theme, { expanded: true });
   const expandedLines = callExpanded.render(80);
   assert.ok(expandedLines.length >= 4, 'expanded call must show full task');
+  assert.ok(expandedLines.join('\n').includes('*First line of task instructions.*'), 'expanded task is styled in bold');
 
   // 2. Result rendering: partial, error, and success with bottom stats line
-  const partial = tool.renderResult({ content: [], details: { profile: 'explorer', model: 'sglang/lfm3-1.7b-fp8', elapsedMs: 3200 } }, { expanded: false, isPartial: true }, theme);
+  const partial = tool.renderResult({ content: [{ type: 'text', text: 'Step 1\nStep 2' }], details: { profile: 'explorer', model: 'sglang/lfm3-1.7b-fp8', elapsedMs: 3200 } }, { expanded: false, isPartial: true }, theme);
   assert.ok(partial.render(80).join('\n').includes('RUNNING'));
+  assert.ok(partial.render(80).join('\n').includes('[dim]'), 'active streaming step rendered in 50% fade dim');
 
   const resultData = {
     content: [{ type: 'text', text: '### Summary\nPoint 1: all good\nPoint 2: verified\nPoint 3: done' }],
