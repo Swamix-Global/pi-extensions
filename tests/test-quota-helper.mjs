@@ -19,8 +19,11 @@ const {
 	detailReport,
 	QuotaPoller,
 	resolveCredential,
+	credentialCandidates,
+	fetchQuota,
 	decodeJwtClaims,
 	AuthUnavailableError,
+	AuthRejectedError,
 } = mod;
 assert.ok(parseCodexUsage && parseZaiUsage && QuotaPoller, "bundle exports its pure helpers");
 
@@ -345,4 +348,127 @@ test("resolveCredential: explicit accountId wins; zai keys stay undecorated; mis
 		assert.equal(cred.accountId, undefined);
 	});
 	assert.throws(() => resolveCredential(openaiSpec), AuthUnavailableError);
+});
+
+// ---------------------------------------------------------------------------
+// candidate ranking + auth-rejection fall-through
+// (the `openai` direct-token credential gets 401 no_matching_rule from
+//  chatgpt.com/backend-api/wham/usage — the shared openai-codex token must win)
+// ---------------------------------------------------------------------------
+
+const whamPayload = {
+	plan_type: "plus",
+	rate_limit: {
+		primary_window: { used_percent: 95, limit_window_seconds: 18000, reset_at: 1793921485 },
+		secondary_window: { used_percent: 15, limit_window_seconds: 604800, reset_at: 1794508285 },
+	},
+	credits: { has_credits: false, unlimited: false, balance: "0" },
+};
+
+const unauthorized = {
+	error: { message: "Unauthorized", type: "rejected_by_access_enforcement", code: "no_matching_rule", param: null },
+	status: 401,
+};
+
+const jsonResponse = (status, body) => ({
+	status,
+	ok: status >= 200 && status < 300,
+	json: async () => body,
+});
+
+/** withAuthFile for async bodies: env must stay swapped until the promise
+ * settles, so the test traffic never touches the real credential store. */
+function withAuthFileAsync(entries, fn) {
+	const file = `${process.env.TMPDIR ?? "/tmp"}/quota-helper-auth-${process.pid}-${Math.random().toString(36).slice(2)}.json`;
+	fs.writeFileSync(file, JSON.stringify(entries), { mode: 0o600 });
+	const prev = process.env.PI_QUOTA_HELPER_AUTH;
+	process.env.PI_QUOTA_HELPER_AUTH = file;
+	return fn().finally(() => {
+		process.env.PI_QUOTA_HELPER_AUTH = prev;
+		fs.unlinkSync(file);
+	});
+}
+
+test("credentialCandidates ranks chatgpt-backend tokens first; zai stays single", () => {
+	const spec = adapterForProvider("openai");
+	withAuthFile({
+		openai: { access: fakeJwt({ sub: "direct-token-use" }) }, // no account binding
+		"openai-codex": { access: fakeJwt({ chatgpt_account_id: "acct-shared" }), accountId: "acct-shared" },
+	}, () => {
+		assert.deepEqual(credentialCandidates(spec), ["openai-codex", "openai"]);
+	});
+	withAuthFile({
+		openai: { access: fakeJwt({ chatgpt_account_id: "acct" }), accountId: "acct" },
+		"openai-codex": { access: fakeJwt({ chatgpt_account_id: "acct-shared" }) },
+	}, () => {
+		assert.deepEqual(credentialCandidates(spec), ["openai", "openai-codex"]);
+	});
+	withAuthFile({}, () => {
+		assert.deepEqual(credentialCandidates(adapterForProvider("openai-codex")), ["openai-codex"]);
+		assert.deepEqual(credentialCandidates(ZAI_SPEC), ["zai-coding-cn"]);
+	});
+});
+
+test("fetchQuota falls through a 401 candidate and reports the working source", async () => {
+	const calls = [];
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = async (url, init) => {
+		calls.push({ url: String(url), bearer: String(init.headers.Authorization).slice(0, 12) });
+		return calls.length === 1 ? jsonResponse(401, unauthorized) : jsonResponse(200, whamPayload);
+	};
+	try {
+		await withAuthFileAsync({
+			openai: { access: fakeJwt({ chatgpt_account_id: "ranked-first" }), accountId: "ranked-first" },
+			"openai-codex": { access: fakeJwt({ chatgpt_account_id: "acct-shared" }), accountId: "acct-shared" },
+		}, () => fetchQuota(adapterForProvider("openai"))).then((snap) => {
+			assert.equal(snap.source, "openai-codex");
+			assert.equal(snap.primary.pct, 95);
+			assert.equal(snap.secondary.pct, 15);
+		});
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+	assert.equal(calls.length, 2, "both candidates were tried");
+	assert.match(calls[0].url, /chatgpt\.com\/backend-api\/wham\/usage$/);
+});
+
+test("fetchQuota: all candidates rejected -> AuthRejectedError; none present -> AuthUnavailable", async () => {
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = async () => jsonResponse(401, unauthorized);
+	try {
+		await withAuthFileAsync({
+			openai: { access: fakeJwt({ chatgpt_account_id: "a" }) },
+			"openai-codex": { access: fakeJwt({ chatgpt_account_id: "b" }) },
+		}, () => assert.rejects(() => fetchQuota(adapterForProvider("openai")), AuthRejectedError));
+		await withAuthFileAsync(
+			{ openai: { access: fakeJwt({ chatgpt_account_id: "a" }) } },
+			() => assert.rejects(() => fetchQuota(adapterForProvider("openai")), AuthRejectedError),
+		);
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+	await withAuthFileAsync({}, () => assert.rejects(() => fetchQuota(adapterForProvider("openai")), AuthUnavailableError));
+});
+
+test("QuotaPoller: openai model renders via openai-codex fall-through (gpt-6.1-terra regression)", async () => {
+	const realFetch = globalThis.fetch;
+	let n = 0;
+	globalThis.fetch = async () => (++n === 1 ? jsonResponse(401, unauthorized) : jsonResponse(200, whamPayload));
+	const p = new QuotaPoller(readConfig({ intervalMs: 60000 }));
+	let last = "sentinel";
+	p.retarget({ id: "gpt-6.1-terra", provider: "openai" }, (t) => (last = t));
+	await new Promise((r) => setTimeout(r, 10)); // drain retarget's own (unawaited, pre-swap) refresh
+	try {
+		await withAuthFileAsync({
+			openai: { access: fakeJwt({ sub: "direct-token-use" }) }, // 401s on wham/usage, like the real store
+			"openai-codex": { access: fakeJwt({ chatgpt_account_id: "acct" }), accountId: "acct" },
+		}, () => p.refresh());
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+	const plain = last.replace(/\u001b\[[0-9;]*m/g, "");
+	assert.match(plain, /5h 95%/);
+	assert.match(plain, /wk 15%/);
+	assert.equal(n, 2, "both candidates were exercised");
+	p.stop();
 });

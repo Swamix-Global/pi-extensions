@@ -11,9 +11,14 @@
  *     https://chatgpt.com/backend-api/wham/usage — primary (5h) + secondary (7d)
  *     windows, plan tier and credit balance. Tokens come from
  *     ~/.pi/agent/auth.json (`access` + `accountId`), the same store ctx-engine
- *     uses. `openai` falls back to the `openai-codex` credential (shared ChatGPT
- *     subscription); a missing accountId is derived from the bearer's JWT claims
- *     (`chatgpt_account_id`).
+ *     uses. Credentials are tried as a ranked candidate list: tokens carrying a
+ *     ChatGPT account (`accountId` entry field or `chatgpt_account_id` JWT
+ *     claim) go first, because the `openai` provider's own credential (scopes
+ *     `chatgpt.tokens.use.direct`, no account claim) is rejected by the usage
+ *     endpoint with 401 `no_matching_rule` — the shared `openai-codex`
+ *     subscription token serves the readout instead. A missing accountId is
+ *     derived from the bearer's JWT claims; HTTP 401/403 falls through to the
+ *     next candidate, and the poller hides only when every candidate fails.
  *   - zai    (providers matching *zai*): GET {host}/api/monitor/usage/quota/limit —
  *     unit 3 rows are the 5h window, unit 6 rows the weekly window; plan from
  *     data.level. Host: open.bigmodel.cn for *cn* or bigmodel ids, else api.z.ai.
@@ -74,6 +79,8 @@ export interface QuotaWindow {
 export interface QuotaSnapshot {
 	kind: "codex" | "zai";
 	plan?: string;
+	/** auth.json key the winning credential came from (set by fetchQuota). */
+	source?: string;
 	primary?: QuotaWindow;
 	secondary?: QuotaWindow;
 	credits?: string;
@@ -175,14 +182,26 @@ function readCredential(authProvider: string): Credential | undefined {
 	}
 }
 
-/** Resolve the credential for a spec: the mapped authProvider first; codex
- * providers fall back to `openai-codex` (shared ChatGPT subscription windows). */
+/** Ordered auth.json keys to try for a spec: the mapped authProvider plus the
+ * shared `openai-codex` store for codex providers. Candidates carrying a
+ * ChatGPT account (explicit `accountId` or a `chatgpt_account_id` JWT claim)
+ * rank first — the `openai` direct-token-use credential lacks any account
+ * binding and is rejected by the usage endpoint, so the shared codex token
+ * must be tried before it. Stable sort keeps the mapped provider first on
+ * ties. Pure; unit-tested. */
+export function credentialCandidates(spec: AdapterSpec): string[] {
+	const ids = [spec.authProvider];
+	if (spec.kind === "codex" && spec.authProvider !== "openai-codex") ids.push("openai-codex");
+	const rank = (id: string): number => (readCredential(id)?.accountId ? 0 : 1);
+	return [...ids].sort((a, b) => rank(a) - rank(b));
+}
+
+/** First resolvable credential across the candidate list (see
+ * credentialCandidates); throws when the store has none of them. */
 export function resolveCredential(spec: AdapterSpec): Credential & { source: string } {
-	const primary = readCredential(spec.authProvider);
-	if (primary) return { ...primary, source: spec.authProvider };
-	if (spec.kind === "codex" && spec.authProvider !== "openai-codex") {
-		const shared = readCredential("openai-codex");
-		if (shared) return { ...shared, source: "openai-codex" };
+	for (const id of credentialCandidates(spec)) {
+		const cred = readCredential(id);
+		if (cred) return { ...cred, source: id };
 	}
 	throw new AuthUnavailableError(spec.authProvider);
 }
@@ -285,26 +304,50 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
 	return res.json();
 }
 
-async function fetchQuota(spec: AdapterSpec): Promise<QuotaSnapshot> {
-	const cred = resolveCredential(spec);
-	const now = Date.now();
-	if (spec.kind === "codex") {
-		const payload = await fetchJson(`${spec.host}/backend-api/wham/usage`, {
-			Authorization: `Bearer ${cred.bearer}`,
-			Accept: "application/json",
-			"User-Agent": "pi-quota-helper/1.0",
-			...(cred.accountId ? { "ChatGPT-Account-Id": cred.accountId } : {}),
-		});
-		const snap = parseCodexUsage(payload, now);
-		if (!snap) throw new Error("wham/usage payload carried no rate-limit windows");
-		return snap;
+/** Fetch quota trying every candidate credential in order. HTTP 401/403 falls
+ * through to the next candidate — the poller hides only when every candidate
+ * is absent or rejected — while network/5xx errors surface immediately
+ * (triggering backoff). Exported for tests and live verification. */
+export async function fetchQuota(spec: AdapterSpec): Promise<QuotaSnapshot> {
+	let lastAuthError: AuthRejectedError | undefined;
+	for (const id of credentialCandidates(spec)) {
+		const cred = readCredential(id);
+		if (!cred) continue;
+		try {
+			const snap =
+				spec.kind === "codex" ? await fetchCodexUsage(spec, cred) : await fetchZaiUsage(spec, cred);
+			return { ...snap, source: id };
+		} catch (err) {
+			if (err instanceof AuthRejectedError) {
+				lastAuthError = err;
+				continue;
+			}
+			throw err;
+		}
 	}
+	if (lastAuthError) throw lastAuthError;
+	throw new AuthUnavailableError(spec.authProvider);
+}
+
+async function fetchCodexUsage(spec: AdapterSpec, cred: Credential): Promise<QuotaSnapshot> {
+	const payload = await fetchJson(`${spec.host}/backend-api/wham/usage`, {
+		Authorization: `Bearer ${cred.bearer}`,
+		Accept: "application/json",
+		"User-Agent": "pi-quota-helper/1.0",
+		...(cred.accountId ? { "ChatGPT-Account-Id": cred.accountId } : {}),
+	});
+	const snap = parseCodexUsage(payload, Date.now());
+	if (!snap) throw new Error("wham/usage payload carried no rate-limit windows");
+	return snap;
+}
+
+async function fetchZaiUsage(spec: AdapterSpec, cred: Credential): Promise<QuotaSnapshot> {
 	const payload = await fetchJson(`${spec.host}/api/monitor/usage/quota/limit`, {
 		Authorization: `Bearer ${cred.bearer}`,
 		Accept: "application/json",
 		"User-Agent": "pi-quota-helper/1.0",
 	});
-	const snap = parseZaiUsage(payload, now);
+	const snap = parseZaiUsage(payload, Date.now());
 	if (!snap) throw new Error("quota/limit payload carried no usable limit rows");
 	return snap;
 }
@@ -377,7 +420,7 @@ export function rightJustify(text: string, columns: number): string {
 
 /** Multi-line detail report for /quota. */
 export function detailReport(spec: AdapterSpec, modelId: string, snap: QuotaSnapshot | undefined): string {
-	const head = `${spec.label} · ${modelId}${snap?.plan ? ` · plan ${snap.plan}` : ""}`;
+	const head = `${spec.label} · ${modelId}${snap?.plan ? ` · plan ${snap.plan}` : ""}${snap?.source ? ` · via ${snap.source}` : ""}`;
 	if (!snap) return `${head}\nno quota data yet`;
 	const lines = [head];
 	const row = (name: string, w?: QuotaWindow) => {

@@ -21,15 +21,23 @@ one lightweight authenticated GET every 30 seconds while a session is open.
 Credentials are read from `~/.pi/agent/auth.json` (`access`/`accountId` for codex oauth,
 `key` for zai api keys) — the same store the context router uses — and re-read before
 every fetch, so OAuth refreshes are picked up automatically. `PI_QUOTA_HELPER_AUTH` (or
-`PI_ROUTER_AUTH`) overrides the path. Any other provider renders no status.
+`PI_ROUTER_AUTH`) overrides the path. Codex providers try a ranked candidate list: a
+credential ranks first when it carries a ChatGPT account binding (`accountId` field or
+`chatgpt_account_id` JWT claim) — the `openai` provider's own token (scopes
+`chatgpt.tokens.use.direct`, no account claim) is rejected by the usage endpoint with
+401 `no_matching_rule`, so the shared `openai-codex` subscription token serves the
+readout (`/quota` shows `via <source>`). Auth rejections fall through
+candidate-by-candidate; the status hides only when every candidate fails. Any other
+provider renders no status.
 
 ## Smart polling
 
 - **30s interval, active provider only** (configurable, see Settings).
 - **In-flight guard** — no overlapping requests.
 - **Exponential backoff** on fetch errors: 30s → 1m → 2m → 4m → 5m cap, reset on success.
-- **Auth-aware hide** — a missing credential or an HTTP 401/403 silently hides the status
-  and stops polling instead of flashing errors.
+- **Auth-aware hide** — only when *every* candidate credential is missing or rejected
+  (HTTP 401/403) does the status hide silently and polling stop; a single rejected
+  candidate just falls through to the next one.
 - **Free mid-run updates** — `x-codex-primary/secondary-used-percent` response headers are
   harvested opportunistically when the proxy forwards them.
 - **Immediate refresh** on `session_start` and on provider switch; full teardown on
