@@ -1,11 +1,12 @@
 // filemap — fast git-aware source file map of a folder.
-// Git repos: honor .gitignore chains (root + nested, negation, dir-only, ** globs).
-// Otherwise: standard ignore set + hidden entries. Folders first, then files,
-// alphabetical per directory, depth-capped, item-capped.
+// Git repos use Git's own ignore engine; standalone folders use a conservative
+// standard ignore set. Folders sort before files, alphabetically per directory.
+use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::exit;
+use std::process::{exit, Command, Stdio};
 
 const DEFAULT_MAX_ITEMS: usize = 1000;
 const DEFAULT_MAX_DEPTH: usize = 3;
@@ -14,121 +15,6 @@ const STD_IGNORES: &[&str] = &[
     "node_modules", "target", "dist", "build", "out", "coverage", ".venv", "venv",
     ".pi", "__pycache__", ".next", ".turbo", ".mypy_cache", ".pytest_cache", ".idea",
 ];
-
-struct Rule {
-    neg: bool,
-    dir_only: bool,
-    segs: Vec<String>,
-}
-
-struct IgnoreSet {
-    base: PathBuf,
-    rules: Vec<Rule>,
-}
-
-fn parse_gitignore(dir: &Path) -> Vec<Rule> {
-    let text = match fs::read_to_string(dir.join(".gitignore")) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-    let mut rules = Vec::new();
-    for raw in text.lines() {
-        let line = raw.trim_end();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut pat = line.to_string();
-        let neg = pat.starts_with('!');
-        if neg {
-            pat.remove(0);
-        }
-        if pat.is_empty() {
-            continue;
-        }
-        let dir_only = pat.ends_with('/');
-        if dir_only {
-            pat.pop();
-        }
-        if pat.is_empty() {
-            continue;
-        }
-        let anchored = pat.trim_end_matches('/').contains('/') || line.starts_with('/');
-        let pat = pat.trim_start_matches('/').to_string();
-        if pat.is_empty() {
-            continue;
-        }
-        let mut segs: Vec<String> = pat.split('/').map(|s| s.to_string()).collect();
-        if !anchored {
-            segs.insert(0, "**".to_string());
-        }
-        rules.push(Rule { neg, dir_only, segs });
-    }
-    rules
-}
-
-fn seg_match(p: &[char], s: &[char]) -> bool {
-    if p.is_empty() {
-        return s.is_empty();
-    }
-    match p[0] {
-        '*' => (0..=s.len()).any(|k| seg_match(&p[1..], &s[k..])),
-        '?' => !s.is_empty() && seg_match(&p[1..], &s[1..]),
-        '[' => {
-            if s.is_empty() {
-                return false;
-            }
-            let mut i = 1;
-            let negate = i < p.len() && (p[i] == '!' || p[i] == '^');
-            if negate {
-                i += 1;
-            }
-            let mut hit = false;
-            let mut first = true;
-            while i < p.len() {
-                if p[i] == ']' && !first {
-                    break;
-                }
-                first = false;
-                if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
-                    if s[0] >= p[i] && s[0] <= p[i + 2] {
-                        hit = true;
-                    }
-                    i += 3;
-                } else {
-                    if s[0] == p[i] {
-                        hit = true;
-                    }
-                    i += 1;
-                }
-            }
-            if i >= p.len() {
-                return false; // unterminated class
-            }
-            if hit != negate {
-                seg_match(&p[i + 1..], &s[1..])
-            } else {
-                false
-            }
-        }
-        '\\' if p.len() > 1 => !s.is_empty() && s[0] == p[1] && seg_match(&p[2..], &s[1..]),
-        c => !s.is_empty() && s[0] == c && seg_match(&p[1..], &s[1..]),
-    }
-}
-
-fn glob_match(pats: &[String], name: &[String]) -> bool {
-    if pats.is_empty() {
-        return name.is_empty();
-    }
-    if pats[0] == "**" {
-        return (0..=name.len()).any(|k| glob_match(&pats[1..], &name[k..]));
-    }
-    if name.is_empty() {
-        return false;
-    }
-    let pc: Vec<char> = pats[0].chars().collect();
-    let nc: Vec<char> = name[0].chars().collect();
-    seg_match(&pc, &nc) && glob_match(&pats[1..], &name[1..])
-}
 
 struct Entry {
     name: String,
@@ -141,15 +27,22 @@ fn main() {
     let mut max_items = DEFAULT_MAX_ITEMS;
     let mut max_depth = DEFAULT_MAX_DEPTH;
     let mut i = 0;
+
     while i < argv.len() {
         match argv[i].as_str() {
             "--max-items" => {
                 i += 1;
-                max_items = argv.get(i).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_ITEMS);
+                max_items = argv
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_ITEMS);
             }
             "--max-depth" => {
                 i += 1;
-                max_depth = argv.get(i).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_DEPTH);
+                max_depth = argv
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_DEPTH);
             }
             s if !s.starts_with('-') && root.is_none() => root = Some(PathBuf::from(s)),
             s => {
@@ -160,6 +53,7 @@ fn main() {
         }
         i += 1;
     }
+
     let Some(root) = root else {
         eprintln!("usage: filemap <root> [--max-items N] [--max-depth D]");
         exit(2);
@@ -175,25 +69,17 @@ fn main() {
         eprintln!("filemap: not a directory: {}", root.display());
         exit(2);
     }
+
     let max_depth = max_depth.clamp(1, 8);
     let max_items = max_items.clamp(1, 100_000);
-
     let git_root = find_git_root(&root);
-    let mut lines: Vec<String> = Vec::new();
-    let mut state = State { items: 0, more: 0, truncated: false, max_items };
-
-    let mut root_chain: Vec<IgnoreSet> = Vec::new();
-    if let Some(gr) = &git_root {
-        // gitignores from repo root down to (and including) the walk root
-        let mut cur = gr.clone();
-        root_chain.push(IgnoreSet { base: cur.clone(), rules: parse_gitignore(&cur) });
-        if let Ok(rel_from_root) = root.strip_prefix(gr) {
-            for seg in rel_from_root.components() {
-                cur = cur.join(seg);
-                root_chain.push(IgnoreSet { base: cur.clone(), rules: parse_gitignore(&cur) });
-            }
-        }
-    }
+    let mut lines = Vec::new();
+    let mut state = State {
+        items: 0,
+        more: 0,
+        truncated: false,
+        max_items,
+    };
 
     lines.push(format!(
         "{} ({}, depth<={}, {} items)",
@@ -202,9 +88,22 @@ fn main() {
         max_depth,
         0
     ));
-    walk(&root, &mut Vec::new(), 1, max_depth, &git_root.is_some(), &mut root_chain, &mut lines, &mut state);
+    if let Err(error) = walk(
+        &root,
+        1,
+        max_depth,
+        git_root.as_deref(),
+        &mut lines,
+        &mut state,
+    ) {
+        eprintln!("filemap: {error}");
+        exit(2);
+    }
     if state.truncated {
-        lines.push(format!("... {} more entries not shown (raise --max-items)", state.more));
+        lines.push(format!(
+            "... {} more entries not shown (raise --max-items)",
+            state.more
+        ));
     }
     lines[0] = format!(
         "{} ({}, depth<={}, {} items)",
@@ -234,6 +133,73 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+fn git_path(root: &Path, dir: &Path, name: &str, is_dir: bool) -> Result<String, String> {
+    let rel_dir = dir
+        .strip_prefix(root)
+        .map_err(|e| format!("cannot make {} relative to {}: {e}", dir.display(), root.display()))?;
+    let mut path = rel_dir.to_path_buf();
+    path.push(name);
+    let mut path = path.to_string_lossy().into_owned();
+    if is_dir {
+        path.push('/');
+    }
+    Ok(path)
+}
+
+fn git_ignored_paths(
+    root: &Path,
+    dir: &Path,
+    entries: &[Entry],
+) -> Result<HashSet<String>, String> {
+    if entries.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let paths: Vec<String> = entries
+        .iter()
+        .map(|entry| git_path(root, dir, &entry.name, entry.is_dir))
+        .collect::<Result<_, _>>()?;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run git check-ignore: {e}"))?;
+    {
+        let input = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "cannot open git check-ignore input".to_string())?;
+        for path in &paths {
+            input
+                .write_all(path.as_bytes())
+                .and_then(|_| input.write_all(&[0]))
+                .map_err(|e| format!("cannot send paths to git check-ignore: {e}"))?;
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot read git check-ignore result: {e}"))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("git check-ignore failed with {}", output.status)
+        } else {
+            format!("git check-ignore failed: {detail}")
+        });
+    }
+
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
 fn ci_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let al = a.to_lowercase();
     let bl = b.to_lowercase();
@@ -243,81 +209,52 @@ fn ci_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 #[allow(clippy::too_many_arguments)]
 fn walk(
     dir: &Path,
-    rel: &[String],
     depth: usize,
     max_depth: usize,
-    git_mode: &bool,
-    chain: &mut Vec<IgnoreSet>,
+    git_root: Option<&Path>,
     lines: &mut Vec<String>,
-    st: &mut State,
-) {
+    state: &mut State,
+) -> Result<(), String> {
     let read = match fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
+        Ok(read) => read,
+        Err(_) => return Ok(()),
     };
-    let this_base = dir.to_path_buf();
-    // snapshot ignore rules that apply to entries of this dir (chain covers ancestors)
-    let applies = |set: &IgnoreSet| dir.starts_with(&set.base);
-
-    let mut entries: Vec<Entry> = Vec::new();
-    for e in read.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
+    let mut candidates = Vec::new();
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
         if name == ".git" {
             continue;
         }
-        let meta = match fs::symlink_metadata(e.path()) {
-            Ok(m) => m,
+        let meta = match fs::symlink_metadata(entry.path()) {
+            Ok(meta) => meta,
             Err(_) => continue,
         };
-        let is_symlink = meta.file_type().is_symlink();
-        let is_dir = meta.is_dir(); // symlinked dirs treated as files (no cycles)
+        candidates.push(Entry {
+            name,
+            is_dir: meta.is_dir(),
+        });
+    }
 
-        if *git_mode {
-            let mut verdict = false;
-            for set in chain.iter().filter(|s| applies(s)) {
-                let mut base_segs: Vec<String> = dir
-                    .strip_prefix(&set.base)
-                    .unwrap_or_else(|_| Path::new(""))
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().to_string())
-                    .collect();
-                base_segs.push(name.clone());
-                let mut last: Option<&Rule> = None;
-                for r in &set.rules {
-                    if r.dir_only && !is_dir {
-                        // dir-only patterns can still match an ancestor; ancestors were
-                        // pruned during traversal, so only direct match matters here.
-                        continue;
-                    }
-                    if r.dir_only {
-                        // try the dir itself and any prefix path (a/b/ matches dir a/b)
-                        for k in 1..=base_segs.len() {
-                            if glob_match(&r.segs, &base_segs[..k]) {
-                                last = Some(r);
-                                break;
-                            }
-                        }
-                    } else if glob_match(&r.segs, &base_segs) {
-                        last = Some(r);
-                    }
-                }
-                if let Some(r) = last {
-                    verdict = !r.neg;
-                }
-            }
-            if verdict {
+    let ignored = if let Some(root) = git_root {
+        git_ignored_paths(root, dir, &candidates)?
+    } else {
+        HashSet::new()
+    };
+    let mut entries = Vec::new();
+    for entry in candidates {
+        if let Some(root) = git_root {
+            if ignored.contains(&git_path(root, dir, &entry.name, entry.is_dir)?) {
                 continue;
             }
         } else {
-            if name.starts_with('.') {
+            if entry.name.starts_with('.') {
                 continue;
             }
-            if is_dir && STD_IGNORES.contains(&name.as_str()) {
+            if entry.is_dir && STD_IGNORES.contains(&entry.name.as_str()) {
                 continue;
             }
         }
-
-        entries.push(Entry { name, is_dir: is_dir && !is_symlink });
+        entries.push(entry);
     }
 
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -326,36 +263,29 @@ fn walk(
         _ => ci_cmp(&a.name, &b.name),
     });
 
-    // nested gitignore (git mode only)
-    let mut added_rules = false;
-    if *git_mode {
-        let rules = parse_gitignore(&this_base);
-        if !rules.is_empty() {
-            chain.push(IgnoreSet { base: this_base.clone(), rules });
-            added_rules = true;
-        }
-    }
-
     let indent = "  ".repeat(depth.saturating_sub(1));
-    for ent in &entries {
-        let full = if st.truncated { None } else if st.items < st.max_items { Some(()) } else { None };        match full {
-            Some(_) => {
-                st.items += 1;
-                lines.push(format!("{indent}{}{}", ent.name, if ent.is_dir { "/" } else { "" }));
-            }
-            None => {
-                st.truncated = true;
-                st.more += 1;
-            }
+    for entry in &entries {
+        if state.items < state.max_items && !state.truncated {
+            state.items += 1;
+            lines.push(format!(
+                "{indent}{}{}",
+                entry.name,
+                if entry.is_dir { "/" } else { "" }
+            ));
+        } else {
+            state.truncated = true;
+            state.more += 1;
         }
-        if ent.is_dir && depth < max_depth {
-            let mut child_rel: Vec<String> = rel.to_vec();
-            child_rel.push(ent.name.clone());
-            walk(&this_base.join(&ent.name), &child_rel, depth + 1, max_depth, git_mode, chain, lines, st);
+        if entry.is_dir && depth < max_depth {
+            walk(
+                &dir.join(&entry.name),
+                depth + 1,
+                max_depth,
+                git_root,
+                lines,
+                state,
+            )?;
         }
     }
-
-    if added_rules {
-        chain.pop();
-    }
+    Ok(())
 }

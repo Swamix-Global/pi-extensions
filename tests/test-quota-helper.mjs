@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 
 // Hermetic: no auth store, so any credential lookup fails instead of hitting the network.
 process.env.PI_QUOTA_HELPER_AUTH = "/nonexistent-quota-helper-test-auth.json";
@@ -17,6 +18,9 @@ const {
 	rightJustify,
 	detailReport,
 	QuotaPoller,
+	resolveCredential,
+	decodeJwtClaims,
+	AuthUnavailableError,
 } = mod;
 assert.ok(parseCodexUsage && parseZaiUsage && QuotaPoller, "bundle exports its pure helpers");
 
@@ -167,7 +171,7 @@ test("formatDuration is compact and monotonic", () => {
 
 const FUTURE = Date.now() + 3600_000;
 
-test("formatSnapshot renders model label, both windows, resets; colors by threshold", () => {
+test("formatSnapshot is dense quota-only: windows, resets, threshold colors", () => {
 	const snap = {
 		kind: "codex",
 		plan: "pro",
@@ -175,36 +179,39 @@ test("formatSnapshot renders model label, both windows, resets; colors by thresh
 		secondary: { pct: 12, resetsAtMs: Date.now() + 3 * 86400_000 },
 		fetchedAtMs: 1,
 	};
-	const text = formatSnapshot(CODEX_SPEC, "gpt-6-luna", snap);
+	const text = formatSnapshot(snap);
 	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
-	assert.match(plain, /^codex gpt-6-luna pro │ 5h 42% ↻1h0m │ wk 12% ↻3d0h$/);
+	assert.match(plain, /^5h 42% ↻1h0m │ wk 12% ↻3d0h$/);
+	assert.ok(!plain.includes("codex") && !plain.includes("luna"), "model/label stays out of the status");
 	assert.ok(text.includes("\u001b[38;2;110;200;130m"), "healthy window is green");
 	assert.ok(!text.includes("\u001b[38;2;255;90;90m"), "nothing red at 42%");
 });
 
 test("formatSnapshot escalates color at 70 and 90 percent", () => {
 	const mk = (pct) => ({ kind: "zai", primary: { pct }, fetchedAtMs: 1 });
-	assert.ok(formatSnapshot(ZAI_SPEC, "glm-5.3", mk(69)).includes("\u001b[38;2;110;200;130m"));
-	assert.ok(formatSnapshot(ZAI_SPEC, "glm-5.3", mk(72)).includes("\u001b[38;2;255;170;60m"));
-	assert.ok(formatSnapshot(ZAI_SPEC, "glm-5.3", mk(95)).includes("\u001b[38;2;255;90;90m"));
+	assert.ok(formatSnapshot(mk(69)).includes("\u001b[38;2;110;200;130m"));
+	assert.ok(formatSnapshot(mk(72)).includes("\u001b[38;2;255;170;60m"));
+	assert.ok(formatSnapshot(mk(95)).includes("\u001b[38;2;255;90;90m"));
 });
 
-test("formatSnapshot placeholder, reset suppression, and org-stripped labels", () => {
-	const pending = formatSnapshot(CODEX_SPEC, "gpt-6-luna", undefined);
-	assert.match(pending.replace(/\u001b\[[0-9;]*m/g, ""), /^codex quota ⟳$/);
+test("formatSnapshot placeholder, reset suppression, dense quota-only", () => {
+	const pending = formatSnapshot(undefined);
+	assert.match(pending.replace(/\u001b\[[0-9;]*m/g, ""), /^quota ⟳$/);
 	const snap = { kind: "codex", primary: { pct: 42, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
-	const bare = formatSnapshot(ZAI_SPEC, "z-ai/glm-5.3-flash", snap, false);
-	assert.equal(bare.replace(/\u001b\[[0-9;]*m/g, ""), "glm glm-5.3-flash │ 5h 42%");
+	const bare = formatSnapshot(snap, false);
+	assert.equal(bare.replace(/\u001b\[[0-9;]*m/g, ""), "5h 42%");
 });
 
 test("rightJustify pads with NBSP that survives footer sanitization", () => {
-	const text = "codex │ 5h 42%";
+	const text = "5h 42% │ wk 12%";
 	const padded = rightJustify(text, 80);
-	assert.equal(padded.length - text.length, 80 - text.length);
-	assert.ok(padded.startsWith("\u00a0".repeat(80 - text.length)));
-	// pi footer sanitize: strip \r\n\t, collapse ASCII-space runs, trim — NBSP survives.
+	const plain = padded.replace(/\u001b\[[0-9;]*m/g, "");
+	assert.equal(plain.length - text.length, 80 - text.length);
+	assert.ok(plain.startsWith("\u00a0".repeat(80 - text.length)), "pads with NBSP");
+	assert.ok(padded.startsWith("\u001b[0m"), "padding run is ANSI-prefixed so trim() cannot strip it");
+	// pi footer sanitize (verbatim): strip \r\n\t, collapse ASCII-space runs, trim.
 	const sanitized = padded.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
-	assert.equal(sanitized, padded);
+	assert.equal(sanitized, padded, "padding survives the real footer sanitization");
 	assert.equal(rightJustify("x".repeat(90), 80), "x".repeat(90));
 	assert.equal(visibleWidth(padded), 80);
 });
@@ -249,7 +256,7 @@ test("QuotaPoller: header harvest updates codex windows instantly", () => {
 	const plain = last.replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(plain, /5h 58%/);
 	assert.match(plain, /wk 21%/);
-	assert.match(plain, /codex gpt-6-luna/);
+	assert.ok(!plain.includes("gpt-6-luna"), "status stays quota-only after header harvest");
 });
 
 test("QuotaPoller: missing credential hides status and stops polling", async () => {
@@ -279,9 +286,63 @@ test("QuotaPoller: start/stop lifecycle renders then clears", async () => {
 // Reference unused export guard (keeps import list honest if bundle changes).
 test("bundle keeps ANSI styling only (no width-widening glyphs in status)", () => {
 	const snap = { kind: "codex", primary: { pct: 42, resetsAtMs: FUTURE }, secondary: { pct: 12 }, fetchedAtMs: 1 };
-	const text = formatSnapshot(CODEX_SPEC, "gpt-6-luna", snap);
+	const text = formatSnapshot(snap);
+	const allowed = new Set(["│", "↻"]); // U+2502, U+21BB — narrow/ambiguous, 1 cell in western terminals
 	for (const ch of text.replace(/\u001b\[[0-9;]*m/g, "")) {
 		const cp = ch.codePointAt(0);
-		assert.ok(cp < 0x1100 || cp === 0xa0, `unexpected wide glyph: U+${cp.toString(16)}`);
+		assert.ok(cp < 0x7f || cp === 0xa0 || allowed.has(ch), `unexpected glyph: U+${cp.toString(16)}`);
 	}
+});
+
+// ---------------------------------------------------------------------------
+// credential resolution: openai->openai-codex fallback + JWT accountId claims
+// ---------------------------------------------------------------------------
+
+const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+const fakeJwt = (claims) => `${b64url({ alg: "RS256", typ: "JWT" })}.${b64url(claims)}.sig`;
+
+function withAuthFile(entries, fn) {
+	const file = `${process.env.TMPDIR ?? "/tmp"}/quota-helper-auth-${process.pid}-${Math.random().toString(36).slice(2)}.json`;
+	fs.writeFileSync(file, JSON.stringify(entries), { mode: 0o600 });
+	const prev = process.env.PI_QUOTA_HELPER_AUTH;
+	process.env.PI_QUOTA_HELPER_AUTH = file;
+	try {
+		return fn();
+	} finally {
+		process.env.PI_QUOTA_HELPER_AUTH = prev;
+		fs.unlinkSync(file);
+	}
+}
+
+test("decodeJwtClaims extracts chatgpt_account_id from a bearer JWT", () => {
+	assert.equal(decodeJwtClaims(fakeJwt({ chatgpt_account_id: "acct-42" })).chatgpt_account_id, "acct-42");
+	assert.equal(decodeJwtClaims("sk-plain-api-key"), undefined);
+	assert.equal(decodeJwtClaims("a.b."), undefined); // broken payload
+	assert.equal(decodeJwtClaims("a.not-json!.c"), undefined);
+});
+
+test("resolveCredential: openai falls back to openai-codex and derives accountId from JWT", () => {
+	const spec = adapterForProvider("openai");
+	withAuthFile({ "openai-codex": { access: fakeJwt({ chatgpt_account_id: "acct-shared" }) } }, () => {
+		const cred = resolveCredential(spec);
+		assert.equal(cred.source, "openai-codex", "falls back to the shared codex credential");
+		assert.equal(cred.accountId, "acct-shared", "accountId derived from JWT claims");
+	});
+});
+
+test("resolveCredential: explicit accountId wins; zai keys stay undecorated; missing auth throws", () => {
+	const openaiSpec = adapterForProvider("openai");
+	withAuthFile({
+		openai: { access: fakeJwt({ chatgpt_account_id: "from-jwt" }), accountId: "acct-explicit" },
+	}, () => {
+		const cred = resolveCredential(openaiSpec);
+		assert.equal(cred.source, "openai");
+		assert.equal(cred.accountId, "acct-explicit");
+	});
+	withAuthFile({ "zai-coding-cn": { key: "sk-zai-plain" } }, () => {
+		const cred = resolveCredential(ZAI_SPEC);
+		assert.equal(cred.source, "zai-coding-cn");
+		assert.equal(cred.accountId, undefined);
+	});
+	assert.throws(() => resolveCredential(openaiSpec), AuthUnavailableError);
 });

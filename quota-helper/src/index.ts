@@ -2,14 +2,18 @@
  * quota-helper — provider quota (5h + weekly windows) in Pi's footer status bar.
  *
  * Tracks the currently selected model's provider and smart-polls only that
- * provider's usage endpoint every 30s (configurable), rendering right-justified
- * usage percentages:  `gpt-6-luna │ 5h 42% ↻1h12m │ wk 12% ↻3d4h`
+ * provider's usage endpoint every 30s (configurable), rendering a dense,
+ * right-justified, quota-only readout:  `5h 42% ↻1h12m │ wk 12% ↻3d4h`
+ * (the model name is redundant — the footer already shows it on the left).
  *
  * Adapters:
  *   - codex  (providers `openai-codex`, `openai` oauth): GET
  *     https://chatgpt.com/backend-api/wham/usage — primary (5h) + secondary (7d)
  *     windows, plan tier and credit balance. Tokens come from
- *     ~/.pi/agent/auth.json (`access` + `accountId`), the same store ctx-engine uses.
+ *     ~/.pi/agent/auth.json (`access` + `accountId`), the same store ctx-engine
+ *     uses. `openai` falls back to the `openai-codex` credential (shared ChatGPT
+ *     subscription); a missing accountId is derived from the bearer's JWT claims
+ *     (`chatgpt_account_id`).
  *   - zai    (providers matching *zai*): GET {host}/api/monitor/usage/quota/limit —
  *     unit 3 rows are the 5h window, unit 6 rows the weekly window; plan from
  *     data.level. Host: open.bigmodel.cn for *cn* or bigmodel ids, else api.z.ai.
@@ -129,6 +133,21 @@ interface Credential {
 	accountId?: string;
 }
 
+/** Decode JWT payload claims (base64url, no signature check — read-only use). */
+export function decodeJwtClaims(bearer: string): Record<string, unknown> | undefined {
+	const parts = bearer.split(".");
+	if (parts.length !== 3) return undefined;
+	try {
+		const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+		const claims: unknown = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+		return claims && typeof claims === "object" && !Array.isArray(claims)
+			? (claims as Record<string, unknown>)
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function authFilePath(): string {
 	return (
 		process.env.PI_QUOTA_HELPER_AUTH ||
@@ -144,11 +163,28 @@ function readCredential(authProvider: string): Credential | undefined {
 		if (!entry || typeof entry !== "object") return undefined;
 		const bearer = entry.access ?? entry.key ?? entry.apiKey;
 		if (typeof bearer !== "string" || bearer.length === 0) return undefined;
-		const accountId = typeof entry.accountId === "string" ? entry.accountId : undefined;
+		const accountId = typeof entry.accountId === "string" && entry.accountId
+			? entry.accountId
+			: ((): string | undefined => {
+					const v = decodeJwtClaims(bearer)?.chatgpt_account_id;
+					return typeof v === "string" ? v : undefined;
+				})();
 		return { bearer, accountId };
 	} catch {
 		return undefined;
 	}
+}
+
+/** Resolve the credential for a spec: the mapped authProvider first; codex
+ * providers fall back to `openai-codex` (shared ChatGPT subscription windows). */
+export function resolveCredential(spec: AdapterSpec): Credential & { source: string } {
+	const primary = readCredential(spec.authProvider);
+	if (primary) return { ...primary, source: spec.authProvider };
+	if (spec.kind === "codex" && spec.authProvider !== "openai-codex") {
+		const shared = readCredential("openai-codex");
+		if (shared) return { ...shared, source: "openai-codex" };
+	}
+	throw new AuthUnavailableError(spec.authProvider);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +216,9 @@ export function parseCodexUsage(payload: unknown, nowMs = 0): QuotaSnapshot | nu
 	let credits: string | undefined;
 	const cred = body.credits as Record<string, unknown> | undefined;
 	if (cred?.has_credits === true && typeof cred.balance === "number" && cred.unlimited !== true) {
-		credits = `$${(cred.balance * 0.04).toFixed(2)} · ${Math.floor(cred.balance)} credits`;
+		// Floor at 2 decimals: never overstate the remaining dollar balance.
+		const dollars = Math.floor(cred.balance * 0.04 * 100) / 100;
+		credits = `$${dollars.toFixed(2)} · ${Math.floor(cred.balance)} credits`;
 	}
 	return {
 		kind: "codex",
@@ -248,8 +286,7 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
 }
 
 async function fetchQuota(spec: AdapterSpec): Promise<QuotaSnapshot> {
-	const cred = readCredential(spec.authProvider);
-	if (!cred) throw new AuthUnavailableError(spec.authProvider);
+	const cred = resolveCredential(spec);
 	const now = Date.now();
 	if (spec.kind === "codex") {
 		const payload = await fetchJson(`${spec.host}/backend-api/wham/usage`, {
@@ -312,37 +349,30 @@ function windowText(tag: string, w: QuotaWindow, showResets: boolean): string {
 	let text = `${pctColor(w.pct)}${tag} ${pct}%${RESET}`;
 	if (showResets && w.resetsAtMs) {
 		const left = formatDuration(w.resetsAtMs - Date.now());
-		if (left) text += `${GRAY}↻${left}${RESET}`;
+		if (left) text += `${GRAY} ↻${left}${RESET}`;
 	}
 	return text;
 }
 
-function labelFor(spec: AdapterSpec, modelId: string, plan?: string): string {
-	const model = modelId.includes("/") ? modelId.split("/").pop()! : modelId;
-	const tier = plan ? ` ${plan}` : "";
-	return `${GRAY}${spec.label} ${model}${tier}${RESET}`;
-}
-
-/** One-line status text for the footer (ANSI styled; single-width glyphs only). */
-export function formatSnapshot(
-	spec: AdapterSpec,
-	modelId: string,
-	snap: QuotaSnapshot | undefined,
-	showResets = true,
-): string {
-	if (!snap) return `${GRAY}${spec.label} quota ⟳${RESET}`;
+/** One-line status text for the footer: dense quota-only readout
+ * `5h 42% ↻1h12m │ wk 12% ↻3d4h`. The model name is deliberately omitted —
+ * the footer's left side already shows it. ANSI styled; single-width glyphs. */
+export function formatSnapshot(snap: QuotaSnapshot | undefined, showResets = true): string {
+	if (!snap) return `${GRAY}quota ⟳${RESET}`;
 	const sep = `${GRAY} │ ${RESET}`;
-	const parts = [labelFor(spec, modelId, snap.plan)];
+	const parts: string[] = [];
 	if (snap.primary) parts.push(windowText("5h", snap.primary, showResets));
 	if (snap.secondary) parts.push(windowText("wk", snap.secondary, showResets));
-	return parts.join(sep);
+	return parts.length > 0 ? parts.join(sep) : `${GRAY}quota ⟳${RESET}`;
 }
 
-/** Right-justify by padding with NBSP: pi's footer collapses ASCII space runs,
- * so U+00A0 is the only padding that survives sanitization (1 cell wide). */
+/** Right-justify by padding with NBSP. pi's footer runs trim() on every status
+ * and trim() strips NBSP too (it is Unicode whitespace), so the padding run is
+ * prefixed with a reset escape: ANSI codes are not whitespace, the interior
+ * NBSPs survive sanitization at 1 cell each, and the line lands flush right. */
 export function rightJustify(text: string, columns: number): string {
 	const pad = columns - visibleWidth(text);
-	return pad > 0 ? "\u00a0".repeat(pad) + text : text;
+	return pad > 0 ? RESET + "\u00a0".repeat(pad) + text : text;
 }
 
 /** Multi-line detail report for /quota. */
@@ -385,15 +415,17 @@ export function readConfig(block: Record<string, unknown>): QuotaConfig {
 	};
 }
 
-/** Exponential backoff after consecutive failures: interval * 2^(n-1), 5min cap. */
+/** Exponential backoff after consecutive failures: interval * 2^(n-1) — the
+ * first failure waits one interval, then doubles — capped at 5 minutes. */
 export function backoffMs(intervalMs: number, consecutiveFailures: number): number {
 	const cap = 5 * 60_000;
-	const factor = Math.min(Math.max(consecutiveFailures, 0), 5);
+	const factor = Math.min(Math.max(consecutiveFailures - 1, 0), 5);
 	return Math.min(intervalMs * 2 ** factor, cap);
 }
 
 export class QuotaPoller {
 	private spec: AdapterSpec | undefined;
+	private family = ""; // kind:host — stable across openai↔openai-codex model switches
 	private modelId = "";
 	private snapshot: QuotaSnapshot | undefined;
 	private timer: ReturnType<typeof setInterval> | undefined;
@@ -406,21 +438,24 @@ export class QuotaPoller {
 
 	constructor(private readonly cfg: QuotaConfig) {}
 
-	/** Re-target the active provider/model; refreshes immediately when it changed. */
+	/** Re-target the active provider/model; refreshes immediately when the quota
+	 * family (adapter kind + host) changed — openai↔openai-codex share windows. */
 	retarget(model: { id: string; provider: string } | undefined, sink?: StatusSink): void {
 		if (sink) this.sink = sink;
 		const spec = model ? adapterForProvider(model.provider) : undefined;
-		const providerChanged = spec?.authProvider !== this.spec?.authProvider;
+		const family = spec ? `${spec.kind}:${spec.host}` : "";
+		const familyChanged = family !== "" && family !== this.family;
 		this.spec = spec;
+		this.family = family;
 		this.modelId = model?.id ?? "";
-		if (providerChanged) {
+		if (familyChanged) {
 			this.snapshot = undefined;
 			this.fails = 0;
 			this.nextAttemptAt = 0;
 			this.hidden = false;
 		}
 		this.render();
-		if (providerChanged) void this.refresh();
+		if (familyChanged) void this.refresh();
 	}
 
 	start(sink: StatusSink): void {
@@ -508,7 +543,7 @@ export class QuotaPoller {
 			this.sink(undefined);
 			return;
 		}
-		const text = formatSnapshot(this.spec, this.modelId, this.snapshot, this.cfg.showResets);
+		const text = formatSnapshot(this.snapshot, this.cfg.showResets);
 		const cols = process.stdout.columns ?? 80;
 		this.sink(rightJustify(text, cols));
 	}
