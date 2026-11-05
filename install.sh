@@ -5,7 +5,7 @@ set -euo pipefail
 
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-packages=(tool-scripting sgai-formatter util-compaction tool-search questionnaire quota-helper util-frankenstein)
+packages=(tool-scripting sgai-formatter util-compaction tool-search util-questionnaire util-quota-helper util-frankenstein)
 
 bash "$source_dir/scripts/build-all.sh"
 
@@ -14,7 +14,8 @@ rm -f "$agent_dir/lib/extension-settings.mjs"   # settings helper is inlined int
 
 # Clean up retired pre-migration folders so pi does not load obsolete duplicates.
 rm -rf "$agent_dir/extensions/smartbash" "$agent_dir/extensions/smartpython" "$agent_dir/extensions/openai-settings" "$agent_dir/extensions/fallback-compaction" "$agent_dir/extensions/search-tools" \
-  "$agent_dir/extensions/tool-bash" "$agent_dir/extensions/tool-python" "$agent_dir/extensions/tool-call-display" "$agent_dir/extensions/tool-slm" "$agent_dir/extensions/tool-query" "$agent_dir/extensions/tool-explorer" "$agent_dir/extensions/tool-worker"
+  "$agent_dir/extensions/tool-bash" "$agent_dir/extensions/tool-python" "$agent_dir/extensions/tool-call-display" "$agent_dir/extensions/tool-slm" "$agent_dir/extensions/tool-query" "$agent_dir/extensions/tool-explorer" "$agent_dir/extensions/tool-worker" \
+  "$agent_dir/extensions/questionnaire" "$agent_dir/extensions/quota-helper"
 
 for package in "${packages[@]}"; do
   target="$agent_dir/extensions/$package"

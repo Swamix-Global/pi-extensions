@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 // Hermetic: no auth store, so any credential lookup fails instead of hitting the network.
 process.env.PI_QUOTA_HELPER_AUTH = "/nonexistent-quota-helper-test-auth.json";
 
-const mod = await import("../quota-helper/build/quota-helper.js");
+const mod = await import("../util-quota-helper/build/util-quota-helper.js");
 const {
 	parseCodexUsage,
 	parseZaiUsage,
@@ -225,8 +225,8 @@ test("formatSnapshot renders parallel 5h/7d labels with fuel-gauge bars", () => 
 });
 
 test("density ladder is graded: bar cells step 6→5→4→3→0 before clocks drop", () => {
-	const snap = { kind: "codex", primary: { pct: 95, resetsAtMs: FUTURE }, secondary: { pct: 15, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
-	const bars = (d) => (formatSnapshot(snap, d).match(/█/g) ?? []).length / 2; // per window
+	const snap = { kind: "codex", primary: { pct: 95, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
+	const bars = (d) => (formatSnapshot(snap, d).match(/█/g) ?? []).length; // primary gauge cells
 	assert.equal(bars({ bars: 6, resets: true }), 6);
 	assert.equal(bars({ bars: 5, resets: true }), 5);
 	assert.equal(bars({ bars: 4, resets: true }), 4);

@@ -50,10 +50,10 @@ export interface LocalUsageSummary {
 const dataDir = () => process.env.PI_SUBAGENTX_DATA_DIR || join(homedir(), ".pi", "agent");
 const LOCAL_USAGE_FILE = () => join(dataDir(), "subagentx-local-usage.json");
 
-// quota-helper (sibling extension) owns the footer status row while it is live:
+// util-quota-helper (sibling extension) owns the footer status row while it is live:
 // it refreshes ~/.pi/agent/.quota-status-live on every render (30s poll cadence)
 // and unlinks the sentinel when it hides. While fresh, our plain-text meter twin
-// must stay silent — it would append after quota-helper's NBSP-padded line and
+// must stay silent — it would append after util-quota-helper's NBSP-padded line and
 // the footer's truncate ellipsis would eat into the flush-right quota tail.
 // Staleness TTL (2 min) self-heals after a crash without session_shutdown.
 const QUOTA_SENTINEL_FILE = () => join(dataDir(), ".quota-status-live");

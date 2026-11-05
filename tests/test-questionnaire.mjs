@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi/agent");
-const extFile = path.join(agentDir, "extensions", "questionnaire", "build", "questionnaire.js");
+const extFile = path.join(agentDir, "extensions", "util-questionnaire", "build", "util-questionnaire.js");
 assert.ok(existsSync(extFile), `bundle missing: ${extFile} — deploy questionnaire first`);
 
 const piRoot = [

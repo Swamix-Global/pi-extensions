@@ -1,4 +1,4 @@
-# quota-helper
+# util-quota-helper
 
 Shows the **active model's provider quota** — 5-hour rolling window + weekly window — as
 percentages in Pi's footer status bar, **right-justified** to the terminal width.
@@ -68,7 +68,7 @@ units, window lengths, reset times, and credit balance.
 ## Build / test / deploy
 
 ```bash
-npm run build                                    # or: bash scripts/build-extension.sh quota-helper
+npm run build                                    # or: bash scripts/build-extension.sh util-quota-helper
 node --test tests/test-quota-helper.mjs          # from extensions/
 bash install.sh                                  # deploy all extensions to ~/.pi/agent
 ```

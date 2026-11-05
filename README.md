@@ -41,8 +41,8 @@ its own inlined `src/extension-settings.ts` helper (no shared lib import at runt
 | `sgai-formatter/` | Width-aware assistant/tool Markdown rendering; also exposes the synchronous `sgai:format-markdown` event. |
 | `util-compaction/` | Triggers native `ctx.compact()` when estimated context crosses the threshold (default 100k); `/settings:util-compaction [on\|off\|<tokens>]`. |
 | `tool-search/` | `web_search` / `web_fetch` across deepseek, brave, perplexity, searxng and antigravity, with per-call provider selection and automatic failover. |
-| [`questionnaire/`](questionnaire/README.md) | `questionnaire` tool: paginated multiple-choice clarification questions (multi-select, free-text, review & submit page) the agent asks the user before starting ambiguous work. |
-| [`quota-helper/`](quota-helper/README.md) | Footer status-bar widget with the active provider's 5h + weekly quota windows as right-justified percentages; smart 30s polling per selected provider (codex `wham/usage`, zai `quota/limit`), `/quota` detail command. |
+| [`util-questionnaire/`](util-questionnaire/README.md) | `questionnaire` tool: paginated multiple-choice clarification questions (multi-select, free-text, review & submit page) the agent asks the user before starting ambiguous work. |
+| [`util-quota-helper/`](util-quota-helper/README.md) | Footer status-bar widget with the active provider's 5h + weekly quota windows as right-justified percentages; smart 30s polling per selected provider (codex `wham/usage`, zai `quota/limit`), `/quota` detail command. |
 | [`tool-subagentx/`](tool-subagentx/README.md) | One task-based tool with `explorer` (read/search/list), `worker` (local write/execute), and `default` (Luna/subscription GLM) profiles. In-memory child communication; no run documents or standalone explorer/worker packages. |
 | `scripts/` | `build-extension.sh <package>` reads `pi.extensions[0]` and bundles `src/index.ts`; `build-all.sh` builds every package. |
 | `package.json` | Private workspace root: package list, `build` and `install:pi` scripts. |

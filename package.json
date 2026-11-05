@@ -5,13 +5,13 @@
   "type": "module",
   "description": "Pi extension workspace: one npm package per extension, each self-contained and built to a single-file bundle under build/.",
   "workspaces": [
-    "questionnaire",
+    "util-questionnaire",
     "sgai-formatter",
     "tool-scripting",
     "tool-search",
     "tool-subagentx",
     "util-compaction",
-    "quota-helper",
+    "util-quota-helper",
     "util-frankenstein"
   ],
   "scripts": {

@@ -1,4 +1,4 @@
-# questionnaire
+# util-questionnaire
 
 Paginated multiple-choice clarification tool for the Pi coding agent. The agent
 calls `questionnaire` before starting ambiguous work; the user answers with a
@@ -39,12 +39,12 @@ clear error so the model falls back to asking in prose.
 ## Build & deploy
 
 ```bash
-bash scripts/build-extension.sh questionnaire   # from extensions/
+bash scripts/build-extension.sh util-questionnaire   # from extensions/
 # or, repo-wide:
 bash install.sh
 ```
 
-Deployed to `$PI_CODING_AGENT_DIR/extensions/questionnaire/build/questionnaire.js`.
+Deployed to `$PI_CODING_AGENT_DIR/extensions/util-questionnaire/build/util-questionnaire.js`.
 Run `/reload` in existing Pi sessions to activate.
 
 ## Tests

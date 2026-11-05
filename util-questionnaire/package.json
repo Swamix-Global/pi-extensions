@@ -1,0 +1,23 @@
+{
+	"name": "@sgai/pi-util-questionnaire",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"description": "util-questionnaire: paginated multiple-choice clarification questions the agent asks the user to resolve intent before autonomous execution.",
+	"keywords": [
+		"pi-extension"
+	],
+	"pi": {
+		"extensions": [
+			"build/util-questionnaire.js"
+		]
+	},
+	"scripts": {
+		"build": "bash ../../scripts/build-extension.sh util-questionnaire"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	}
+}
