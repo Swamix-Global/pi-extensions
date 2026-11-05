@@ -8,4 +8,4 @@ __pycache__/
 build/
 tool-subagentx/node_modules
 subagentx/node_modules
-native/target/
+**/native/target/
