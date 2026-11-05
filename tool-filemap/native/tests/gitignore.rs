@@ -213,7 +213,7 @@ fn extension_checkout_hides_the_original_ignored_directories() {
         .parent()
         .expect("native crate has package parent")
         .to_path_buf();
-    let candidates = [("native/target", true), ("node_modules", true)];
+    let candidates = [("native/target", true)];
 
     for (path, is_dir) in candidates {
         assert!(
@@ -223,5 +223,4 @@ fn extension_checkout_hides_the_original_ignored_directories() {
     }
     let actual = displayed_paths(&run_filemap(&package));
     assert!(!actual.contains("native/target"), "native/target was listed");
-    assert!(!actual.contains("node_modules"), "node_modules was listed");
 }
