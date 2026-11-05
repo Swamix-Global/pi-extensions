@@ -14,7 +14,7 @@
   ],
   "pi": {
     "extensions": [
-      "build/tool-scripting.js"
+      "build/reloadable/tool-scripting.js"
     ]
   },
   "scripts": {

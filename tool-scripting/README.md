@@ -131,7 +131,7 @@ The native `bash` tool remains available. Prompt guidance recommends `script`, b
 
 ## Known limitations
 
-- The display budget is currently **10 content rows per box**, not 10 rows for the complete call; borders add more rows. Expanding a result does not remove this display cap.
+- The display budget is **10 content rows per boxlet** when collapsed; expanding (via mouse click or `ctrl+o`) displays the complete, un-truncated full source code in the code boxlet and at least 20 output rows in the result boxlet.
 - Long code-box titles or directory labels can overflow because the title row is not yet wrapped.
 - Below 16 terminal columns, the result fallback omits output text.
 - Legacy results without scripting metadata can display placeholder timing, line counts, or empty log paths. Old calls do not necessarily have scripting log artifacts.

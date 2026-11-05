@@ -1,0 +1,13 @@
+[package]
+name = "filemap"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "filemap"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

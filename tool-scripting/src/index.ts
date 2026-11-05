@@ -1,5 +1,7 @@
 /** Unified script execution and display-time renderers for current and legacy calls. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
 import { bashAdapter, pythonAdapter, type LanguageAdapter } from "./languages.ts";
@@ -27,7 +29,7 @@ function enabled(id: string): boolean {
  return s.enabled !== false && s[id] !== false;
 }
 
-export default function (pi: ExtensionAPI) {
+export function registerToolScripting(pi: ExtensionAPI) {
  pi.registerTool({
   name: "script", label: "Script", parameters, renderShell: "self",
   description: 'Preferred tool for shell and Python execution. Set mode="bash" for shell commands, git and process management; set mode="python" for parsing, calculations and data processing. Required: script (complete raw source) and title (short purpose). Optional: dir (relative to the session directory) and timeout (seconds to wait, NOT a kill deadline). Python runs through uv and supports deps, python version and stdin. Each call starts a separate process with Pi\'s permissions; this is not a sandbox. Output is bounded and logged. On timeout the process continues: use the returned PID and log path to follow up rather than blindly retrying.',
@@ -39,8 +41,8 @@ export default function (pi: ExtensionAPI) {
    if (args.mode === "bash" && (args.deps?.length || args.python || args.stdin !== undefined)) throw new Error("deps, python and stdin are supported only in python mode");
    return runScript(adapter, normalized(args, adapter), signal, onUpdate, { cwd: ctx.cwd });
   },
-  renderCall(args, theme) { const adapter = args.mode === "python" ? pythonAdapter : bashAdapter; return new ScriptCallBox(adapter, normalized(args, adapter), theme); },
-  renderResult(result, opts, theme) { const adapter = result.details?.language === "python" ? pythonAdapter : bashAdapter; return new ScriptResultBox(adapter, result, opts, theme); },
+  renderCall(args, theme, context) { const adapter = args.mode === "python" ? pythonAdapter : bashAdapter; return new ScriptCallBox(adapter, normalized(args, adapter), theme, context as never); },
+  renderResult(result, opts, theme, context) { const adapter = result.details?.language === "python" ? pythonAdapter : bashAdapter; return new ScriptResultBox(adapter, result, opts, theme, context as never); },
  });
  // Registered independently of tool execution: Pi can redraw old bash/python
  // entries even if those tools no longer exist. Original call and result data
@@ -50,8 +52,8 @@ export default function (pi: ExtensionAPI) {
   const adapter = name === "python" ? pythonAdapter : bashAdapter;
   return {
    renderShell: "self",
-   renderCall: (args, theme) => new ScriptCallBox(adapter, normalized(args as Record<string, unknown>, adapter), theme),
-   renderResult: (result, opts, theme) => new ScriptResultBox(adapter, result as never, opts, theme),
+   renderCall: (args, theme, context) => new ScriptCallBox(adapter, normalized(args as Record<string, unknown>, adapter), theme, context as never),
+   renderResult: (result, opts, theme, context) => new ScriptResultBox(adapter, result as never, opts, theme, context as never),
   };
  });
  pi.registerCommand("settings:tool-scripting", {
@@ -64,4 +66,18 @@ export default function (pi: ExtensionAPI) {
    ctx.ui.notify(`tool-scripting: bash ${enabled("bash") ? "on" : "off"}, python ${enabled("python") ? "on" : "off"}`, "info");
   },
  });
+}
+
+// Cache-busted reloadable entry (same pattern as tool-subagentx): Pi's cached
+// ESM/jiti imports keep stale code after /reload, so the default export
+// re-imports this same single-file bundle at a build-specific URL; that
+// versioned instance registers directly, avoiding recursion and ensuring
+// changed code loads. Named exports stay available for tests.
+export default async function (pi: ExtensionAPI): Promise<void> {
+	const url = new URL(import.meta.url);
+	if (url.searchParams.has("tool-scripting-build")) return registerToolScripting(pi);
+	const stat = fs.statSync(fileURLToPath(url), { bigint: true });
+	url.searchParams.set("tool-scripting-build", `${stat.mtimeNs}-${stat.size}`);
+	const fresh = await import(url.href);
+	return fresh.default(pi);
 }

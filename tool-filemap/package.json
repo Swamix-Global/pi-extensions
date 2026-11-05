@@ -1,0 +1,11 @@
+{
+  "name": "@sgai/pi-tool-filemap",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fast git-aware folder file map (Rust binary) exposing the filemap tool to pi and subagents.",
+  "keywords": ["pi", "extension", "tool", "filemap"],
+  "pi": {
+    "extensions": ["build/tool-filemap.js"]
+  }
+}

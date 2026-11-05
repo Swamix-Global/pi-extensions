@@ -10,7 +10,8 @@
     "tool-scripting",
     "tool-search",
     "tool-subagentx",
-    "util-compaction"
+    "util-compaction",
+    "quota-helper"
   ],
   "scripts": {
     "build": "bash scripts/build-all.sh",

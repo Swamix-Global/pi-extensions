@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import factory, {
-  DEFAULT_MODELS, PROFILES, childArgs, getReasoning,
+  DEFAULT_MODELS, PROFILES, childArgs, getReasoning, ActivityFeed,
   parseChildOutput, runProcess, readGlobalLocalUsage, recordLocalUsage, isLocalModel
 } from '../build/reloadable/tool-subagentx.js';
 
@@ -25,7 +25,7 @@ test('strict task-only schema, profiles and no synthetic limit on timeout', () =
   assert.equal(tool.parameters.additionalProperties, false);
   assert.deepEqual(Object.keys(tool.parameters.properties), ['task', 'profile', 'model', 'timeout_seconds']);
   assert.equal(tool.parameters.properties.timeout_seconds.maximum, undefined, 'no synthetic maximum on timeout_seconds');
-  assert.equal(PROFILES.explorer.tools, 'read,grep,find,ls');
+  assert.equal(PROFILES.explorer.tools, 'read,grep,find,ls,filemap');
   assert.equal(PROFILES.worker.tools, 'read,grep,find,ls,bash,edit,write');
   for (const profile of Object.keys(PROFILES)) {
     const args = childArgs(profile, 'zai-coding-cn/glm-5.3', 'high');
@@ -93,9 +93,23 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
   assert.ok(expandedLines.join('\n').includes('*First line of task instructions.*'), 'expanded task is styled in bold');
 
   // 2. Result rendering: partial, error, and success with bottom stats line
-  const partial = tool.renderResult({ content: [{ type: 'text', text: 'Step 1\nStep 2' }], details: { profile: 'explorer', model: 'sglang/lfm3-1.7b-fp8', elapsedMs: 3200 } }, { expanded: false, isPartial: true }, theme);
-  assert.ok(partial.render(80).join('\n').includes('RUNNING'));
-  assert.ok(partial.render(80).join('\n').includes('[dim]'), 'active streaming step rendered in 50% fade dim');
+  const partialDetails = {
+    profile: 'explorer', model: 'sglang/lfm3-1.7b-fp8', elapsedMs: 3200,
+    activity: { lines: ['⚡ read src/index.ts', '✔ read · 0.4s', 'Comparing package manifests across workspaces'], active: 'Scanning re' },
+  };
+  const partial = tool.renderResult({ content: [{ type: 'text', text: 'Step 1\nStep 2' }], details: partialDetails }, { expanded: false, isPartial: true }, theme);
+  const partialRendered = partial.render(100).join('\n');
+  assert.ok(partialRendered.includes('RUNNING'));
+  assert.ok(partialRendered.includes('Ctrl+C aborts'), 'abort hint combined into the metrics line');
+  assert.ok(!partialRendered.includes('⏳'), 'no dedicated delegated-status line');
+  assert.ok(partialRendered.includes('⚡ read src/index.ts'), 'parsed activity step rendered in ticker');
+  assert.ok(partialRendered.includes('Comparing package manifests'), 'settled assistant text rendered at full opacity');
+  assert.ok(partialRendered.includes('Scanning re'), 'in-flight assistant line rendered');
+  assert.ok(!partialRendered.includes('message_update'), 'raw child JSON never leaks into the ticker');
+  assert.ok(partialRendered.includes('[dim]'), 'newest activity line rendered in 50% fade dim');
+  const narrowPartial = partial.render(70).join('\n');
+  assert.ok(narrowPartial.includes('RUNNING'), 'narrow viewport keeps the metrics line');
+  assert.ok(!narrowPartial.includes('Ctrl+C aborts'), 'abort hint drops before clipping on narrow viewports');
 
   const resultData = {
     content: [{ type: 'text', text: '### Summary\nPoint 1: all good\nPoint 2: verified\nPoint 3: done' }],
@@ -236,4 +250,53 @@ fs.writeFileSync(${JSON.stringify(file)},String(child.pid));setInterval(()=>{},1
     try { const stat=readFileSync(`/proc/${pid}/stat`,'utf8');state=stat.slice(stat.lastIndexOf(')')+2)[0]; } catch { state='gone'; }
     assert.ok(['gone','Z'].includes(state), `descendant still running: ${state}`);
   } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('ActivityFeed parses child NDJSON into polished transient steps (start/end collapse, no JSON)', () => {
+  const feed = new ActivityFeed();
+  // Chunk boundary splits the first wire event; the buffer must recover.
+  const events = [
+    JSON.stringify({ type: 'tool_execution_start', toolName: 'read', args: { path: 'src/index.ts' } }),
+    JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Building the\nsummary table' } }),
+    JSON.stringify({ type: 'tool_execution_end', toolName: 'read', durationMs: 410, isError: false }),
+    JSON.stringify({ type: 'tool_execution_start', toolName: 'grep', args: { pattern: 'bun build --target' } }),
+    JSON.stringify({ type: 'tool_execution_end', toolName: 'grep', durationMs: 380, isError: false }),
+    JSON.stringify({ type: 'turn_end', message: { usage: { output: 311 } } }),
+    JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolName: 'read' } }),
+    'not json at all',
+  ].join('\n') + '\n';
+  feed.push(events.slice(0, 10));
+  feed.push(events.slice(10, events.indexOf('"toolName":"read","durationMs"')));
+
+  const mid = feed.snapshot();
+  assert.equal(mid.active, 'summary table', 'in-flight assistant text kept as the active 50%-fade line');
+  assert.deepEqual(mid.lines, ['Building the'], 'settled text line flushed immediately on arrival');
+
+  feed.push(events.slice(events.indexOf('"toolName":"read","durationMs"')));
+  const snap = feed.snapshot();
+  assert.deepEqual(snap.lines, [
+    'Building the',
+    '✔ read src/index.ts · 410ms',
+    '✔ grep bun build --target · 380ms',
+    'summary table',
+    '↵ turn · ↓311 tok',
+  ]);
+  assert.equal(snap.active, '', 'turn_end settles the in-flight line');
+  assert.ok(!snap.lines.join('\n').includes('{'), 'raw JSON never leaks into the ticker');
+  assert.ok(!snap.lines.join('\n').includes('↺'), 'toolcall echoes suppressed');
+
+  // Overlapped tools settle the earlier start as ⚡ when a new start arrives.
+  const overlap = new ActivityFeed();
+  overlap.push([
+    JSON.stringify({ type: 'tool_execution_start', toolName: 'read', args: { path: 'a.md' } }),
+    JSON.stringify({ type: 'tool_execution_start', toolName: 'grep', args: {} }),
+    JSON.stringify({ type: 'tool_execution_end', toolName: 'grep', durationMs: 90, isError: false }),
+  ].join('\n') + '\n');
+  assert.deepEqual(overlap.snapshot().lines, ['⚡ read a.md', '✔ grep · 90ms'], 'overlapped start collapsed, not echoed twice');
+
+  // Ticker cap: only the last 5 steps are retained (tool7 still pending, unseen).
+  const bigFeed = new ActivityFeed();
+  for (let i = 0; i < 8; i++) bigFeed.push(JSON.stringify({ type: 'tool_execution_start', toolName: `tool${i}`, args: {} }) + '\n');
+  assert.equal(bigFeed.snapshot().lines.length, 5);
+  assert.ok(bigFeed.snapshot().lines[0].includes('tool2'), 'oldest steps evicted, newest retained');
 });

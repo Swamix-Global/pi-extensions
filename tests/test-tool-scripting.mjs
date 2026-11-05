@@ -32,7 +32,7 @@ async function loadJiti() {
 }
 const createJiti = await loadJiti();
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi/agent");
-const bundle = process.env.PI_SCRIPTING_BUNDLE ?? path.join(agentDir, "extensions/tool-scripting/build/tool-scripting.js");
+const bundle = process.env.PI_SCRIPTING_BUNDLE ?? path.join(agentDir, "extensions/tool-scripting/build/reloadable/tool-scripting.js");
 assert.ok(fs.existsSync(bundle), `bundle missing: ${bundle} — deploy tool-scripting first`);
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-scripting-"));
 const originalSettingsPath = process.env.PI_EXTENSION_SETTINGS_PATH;
@@ -44,7 +44,7 @@ const factory = mod.default ?? mod;
 const tools = [];
 const resolvers = [];
 const commands = [];
-factory({
+await factory({
  registerTool: (tool) => tools.push(tool),
  registerToolRenderer: (resolver) => resolvers.push(resolver),
  registerCommand: (name, command) => commands.push({ name, command }),
@@ -116,18 +116,37 @@ test("catastrophic guard: rm -rf / is blocked", async () => {
  assert.equal(result.details.status, "blocked");
 });
 
-test("output boxlet: 10 visible content rows max, collapsed and expanded", () => {
- const lines = Array.from({ length: 40 }, (_, i) => `line-${i}`);
- const result = {
-  content: [{ type: "text", text: "[bash] done exit=0\n" + lines.join("\n") }],
-  details: { language: "bash", status: "done", exit: 0, elapsedS: 1.2, waitS: 60, name: "check caps", head: lines.slice(0, 3), tail: lines.slice(-3), totalLines: 40, elided: true, log: "/tmp/x.log" },
+test("output boxlet: 10 rows collapsed, up to 50 rows expanded", () => {
+ const lines40 = Array.from({ length: 40 }, (_, i) => `line-${i}`);
+ const result40 = {
+  content: [{ type: "text", text: "[bash] done exit=0\n" + lines40.join("\n") }],
+  details: { language: "bash", status: "done", exit: 0, elapsedS: 1.2, waitS: 60, name: "check caps", head: lines40.slice(0, 3), tail: lines40.slice(-3), totalLines: 40, elided: true, log: "/tmp/x.log" },
  };
- for (const expanded of [false, true]) {
-  const rows = scriptTool.renderResult(result, { expanded, isPartial: false }, theme).render(80);
+ {
+  const rows = scriptTool.renderResult(result40, { expanded: false, isPartial: false }, theme).render(80);
   const content = rows.slice(1, -1);
-  assert.ok(rows.length <= 12, `rows ${rows.length} for expanded=${expanded}`);
-  assert.ok(content.length <= 10, `content rows ${content.length} for expanded=${expanded}`);
+  assert.ok(rows.length <= 12, `collapsed rows ${rows.length}`);
+  assert.ok(content.length <= 10, `collapsed content rows ${content.length}`);
   for (const row of content) assert.equal(visible(row), 80, `row width ${visible(row)}: ${stripAnsi(row)}`);
+  assert.match(stripAnsi(content[content.length - 1]), /\d+ more lines? truncated/);
+ }
+ {
+  const rows = scriptTool.renderResult(result40, { expanded: true, isPartial: false }, theme).render(80);
+  const content = rows.slice(1, -1);
+  assert.equal(content.length, 40, `40 lines fit within 50-row limit without truncation: ${content.length}`);
+  assert.ok(!stripAnsi(rows.join("\n")).includes("more lines truncated"), "40 lines should not truncate when expanded");
+  for (const row of content) assert.equal(visible(row), 80, `row width ${visible(row)}: ${stripAnsi(row)}`);
+ }
+ const lines80 = Array.from({ length: 80 }, (_, i) => `line-${i}`);
+ const result80 = {
+  content: [{ type: "text", text: "[bash] done exit=0\n" + lines80.join("\n") }],
+  details: { language: "bash", status: "done", exit: 0, elapsedS: 1.2, waitS: 60, name: "check 80 caps", head: lines80.slice(0, 3), tail: lines80.slice(-3), totalLines: 80, elided: true, log: "/tmp/x80.log" },
+ };
+ {
+  const rows = scriptTool.renderResult(result80, { expanded: true, isPartial: false }, theme).render(80);
+  const content = rows.slice(1, -1);
+  assert.equal(content.length, 50, `expanded content rows capped at 50: ${content.length}`);
+  assert.match(stripAnsi(content[content.length - 1]), /31 more lines truncated/);
  }
 });
 
@@ -137,6 +156,30 @@ test("code boxlet: 10 visible content rows max", () => {
  const content = rows.slice(1, -1);
  assert.ok(content.length <= 10, `content rows ${content.length}`);
  assert.match(stripAnsi(content[content.length - 1]), /source truncated/);
+});
+
+test("code boxlet: expanded renders full text without truncation", () => {
+ const script = Array.from({ length: 40 }, (_, i) => `x${i} = ${i}`).join("\n");
+ const rows = scriptTool.renderCall({ mode: "python", title: "check code expand", script }, theme, { expanded: true }).render(80);
+ const content = rows.slice(1, -1);
+ assert.ok(content.length >= 41, `expanded content rows should include title + all code rows: ${content.length}`);
+ assert.ok(!stripAnsi(rows.join("\n")).includes("source truncated"), "expanded call must not truncate");
+ assert.ok(stripAnsi(content[content.length - 1]).includes("x39 = 39"), "last line must be visible in full text");
+});
+
+test("code boxlet: click toggles expansion on tool call", () => {
+ const script = Array.from({ length: 40 }, (_, i) => `x${i} = ${i}`).join("\n");
+ let invalidated = false;
+ const context = { isPartial: true, state: {}, invalidate: () => { invalidated = true; } };
+ const box = scriptTool.renderCall({ mode: "python", title: "check click", script }, theme, context);
+ const collapsedRows = box.render(80);
+ assert.match(stripAnsi(collapsedRows.join("\n")), /source truncated/);
+ const clickResult = box.handleMouse({ type: "click", button: "left", x: 5, y: 3 });
+ assert.deepEqual(clickResult, { handled: true });
+ assert.ok(invalidated, "clicking must invalidate to trigger re-render");
+ const expandedRows = box.render(80);
+ assert.ok(!stripAnsi(expandedRows.join("\n")).includes("source truncated"), "call must expand to full text");
+ assert.ok(expandedRows.length >= 43, `expanded total rows ${expandedRows.length}`);
 });
 
 test("progress bar: full-width top border, monotone fill", () => {
