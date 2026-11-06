@@ -1,6 +1,6 @@
 # util-frankenstein
 
-Opt-in virtual model **`frankenstein/auto`** that interleaves two physical OpenAI Codex
+Virtual model **`openai-codex/auto`** that interleaves two physical OpenAI Codex
 models in one conversation with a fixed sequential slot ratio:
 
     slot 0 → openai-codex/gpt-6-astra  at reasoning "high"
@@ -30,19 +30,43 @@ models in one conversation with a fixed sequential slot ratio:
 ## Commands
 
 ```bash
-/frankenstein on      # switch session to frankenstein/auto, saving current model+level
+/frankenstein on      # switch session to openai-codex/auto, saving current model+level
 /frankenstein off     # restore saved model+level (fallback: astra/high)
 /frankenstein status  # cycle position, recent dispatch log, restore point
-/model frankenstein/auto   # activate directly (also enables); switching away clears state
+/model openai-codex/auto   # activate directly (also enables); switching away clears state
 ```
 
-Selecting `frankenstein/auto` via `/model` saves the previously selected model as the
+Selecting `openai-codex/auto` via `/model` saves the previously selected model as the
 restore point (its thinking level is unknown to the event, so restore defaults to `high`).
 Manually switching away from frankenstein deactivates it and drops the restore point.
 
-## Verification (live RPC, 2025-11-06)
+## Making the rotation the default
 
-7 provider calls across 5 turns (2 with tool continuations): every call matched the
+The virtual model is registered **under the physical provider** (`openai-codex/auto`, not a
+standalone `frankenstein` provider). Pi's startup resolver honours a saved `defaultProvider`
+only when *that* provider has configured auth; a credential-less virtual provider id was
+silently skipped and every launch fell through to the first available model. It also means
+`/model`, scoped models and `enabledModels` treat it like any other codex model.
+
+To rotate on every session, both settings must agree — scoped models outrank the saved
+default at startup:
+
+```jsonc
+{
+  "enabledModels": ["openai-codex/auto", /* …other models… */],
+  "defaultProvider": "openai-codex",
+  "defaultModel": "auto"
+}
+```
+
+A session that still names the retired `frankenstein/auto` provider is migrated back onto
+the virtual model on `session_start`.
+
+## Verification (live, 2026-11-06)
+
+Startup dispatch in a fresh session: `gpt-6-astra@high → gpt-6-luna@max → gpt-6-luna@max`
+over three provider calls (two tool continuations) — the A1:L2 cycle, intact from launch
+without any `/frankenstein on`. Earlier RPC run: 7 provider calls across 5 turns (2 with tool continuations): every call matched the
 A1:L2 slot sequence exactly (`astra/high → luna/max → luna/max → …`), ledger markers and
 cross-model arithmetic recalled correctly, and errored calls (usage-limit) never derailed
 the cycle. Details and drivers: `.pi/experiments/frankenstein-a1l2/`.

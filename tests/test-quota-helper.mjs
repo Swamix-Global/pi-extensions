@@ -157,6 +157,47 @@ test("readConfig applies defaults and clamps", () => {
 	assert.equal(c.intervalMs, 5000);
 	assert.equal(c.showResets, false);
 	assert.equal(readConfig({ intervalMs: 9_999_999 }).intervalMs, 600000);
+	assert.equal(d.metric, "used", "`used` is the default metric");
+	assert.equal(readConfig({ metric: "left" }).metric, "left");
+	assert.equal(readConfig({ metric: "bogus" }).metric, "used", "unknown metric falls back to used");
+});
+
+/** The footer reports ONE metric end to end: the number, the gauge fill and the
+ * trailing word all move together, and the inversion between the wire value and
+ * the printed value can never resurface. Both meters (5h + 7d) always print. */
+test("metric is normalized end-to-end: used counts up, left counts down", () => {
+	const snap = { kind: "codex", primary: { pct: 12 }, secondary: { pct: 30 }, fetchedAtMs: 1 };
+	const strip = (t) => t.replace(/\u001b\[[0-9;]*m/g, "");
+	const solid = (t, tag) => {
+		const seg = t.slice(t.indexOf(tag), t.indexOf("%"));
+		return (seg.match(/█/g) ?? []).length;
+	};
+
+	// default: used — a burning window draws a FULLING gauge and a rising number
+	const used = formatSnapshot(snap, { bars: 4, resets: false });
+	assert.equal(strip(used), "● 5h ▌░░░ 12% used │ 7d █▎░░ 30% used");
+	assert.equal(solid(used, "5h"), 0, "12% used fills well under one of four cells");
+	assert.ok(strip(used).includes("▌") && strip(used).includes("█▎"), "eighth-blocks resolve sub-cell fills");
+
+	// the two metrics are exact complements at every point of the ramp, and the
+	// gauges move in opposite directions because they report the same window
+	for (const pct of [0, 12, 50, 88, 100]) {
+		const u = strip(formatSnapshot({ kind: "zai", primary: { pct } }, { bars: 6, resets: false }));
+		const l = strip(formatSnapshot({ kind: "zai", primary: { pct } }, { metric: "left", bars: 6, resets: false }));
+		const un = Number(u.match(/([\d.]+)% used/)[1]);
+		const ln = Number(l.match(/([\d.]+)% left/)[1]);
+		assert.equal(un + ln, 100, `used ${un} + left ${ln} = 100 at wire ${pct}`);
+		assert.ok(un <= 100 && ln >= 0, `both metrics clamp at wire ${pct}`);
+	}
+
+	// escalation stays keyed to quota LEFT in both modes: a nearly-spent window
+	// is the bold red one whichever metric the footer prints
+	for (const metric of ["used", "left"]) {
+		const hot = formatSnapshot({ kind: "zai", primary: { pct: 97 } }, { metric, bars: 4, resets: false });
+		const calm = formatSnapshot({ kind: "zai", primary: { pct: 3 } }, { metric, bars: 4, resets: false });
+		assert.ok(hot.includes("\u001b[48;2;"), `${metric}: 3% left washes the number`);
+		assert.ok(!calm.includes("\u001b[48;2;"), `${metric}: 97% left stays unwashed`);
+	}
 });
 
 test("backoffMs doubles per failure and caps at 5 minutes", () => {
@@ -192,7 +233,7 @@ test("formatSnapshot is dense quota-only: LED, windows, clock resets, urgency co
 		secondary: { pct: 42, resetsAtMs: Date.now() + 3 * 86400_000 },
 		fetchedAtMs: 1,
 	};
-	const text = formatSnapshot(snap);
+	const text = formatSnapshot(snap, { metric: "left", bars: 0, resets: true });
 	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(plain, /^● 5h 70% left 🕐1h0m │ 7d 58% left 🕐3d0h$/);
 	assert.ok(!plain.includes("codex") && !plain.includes("luna"), "model/label stays out of the status");
@@ -319,7 +360,7 @@ test("ramp laws: the fuel is never dark, the plate never reaches it, alarm only 
 	// borrows the band's plate, so no cell can sit on a lit block where its ink
 	// would have to invert. The plate starts after the last gauge cell.
 	const gauge = (used) => {
-		const text = formatSnapshot({ kind: "codex", primary: { pct: used }, fetchedAtMs: 1 }, { bars: 6, resets: false });
+		const text = formatSnapshot({ kind: "codex", primary: { pct: used }, fetchedAtMs: 1 }, { metric: "left", bars: 6, resets: false });
 		return text.slice(text.indexOf("5h"), text.indexOf("% left"));
 	};
 	for (const left of [100, 88, 76, 64, 54, 44, 26, 7]) {
@@ -335,7 +376,7 @@ test("ramp laws: the fuel is never dark, the plate never reaches it, alarm only 
 	// LAW 3 — bar and number never disagree: the gauge never grows as quota burns,
 	// at every cell count the density ladder can pick.
 	for (const bars of [8, 6, 4, 2]) {
-		const filled = (used) => (formatSnapshot({ kind: "zai", primary: { pct: used } }, { bars, resets: false }).match(/[█▏▎▍▌▋▊▉]/g) ?? []).length;
+		const filled = (used) => (formatSnapshot({ kind: "zai", primary: { pct: used } }, { metric: "left", bars, resets: false }).match(/[█▏▎▍▌▋▊▉]/g) ?? []).length;
 		for (let used = 0; used <= 95; used += 5) assert.ok(filled(used) >= filled(used + 5), `bars=${bars}: used=${used} never draws less than used=${used + 5}`);
 	}
 
@@ -368,12 +409,12 @@ test("ramp laws: the fuel is never dark, the plate never reaches it, alarm only 
 
 /** Direction guard: bar length, tint and printed number all track quota LEFT. */
 test("gauge direction is unambiguous: a fuller bar is always the healthier window", () => {
-	const cells = (used) => ((formatSnapshot({ kind: "zai", primary: { pct: used } }, { bars: 6, resets: false }).match(/█/g) ?? []).length);
+	const cells = (used) => ((formatSnapshot({ kind: "zai", primary: { pct: used } }, { metric: "left", bars: 6, resets: false }).match(/█/g) ?? []).length);
 	assert.equal(cells(0), 6, "untouched window draws a full gauge");
 	assert.equal(cells(50), 3, "half burned, half drawn");
 	assert.equal(cells(100), 0, "exhausted draws nothing");
 	assert.ok(cells(5) > cells(95), "less used always draws more fill");
-	const plain = (used) => formatSnapshot({ kind: "zai", primary: { pct: used } }).replace(/\u001b\[[0-9;]*m/g, "");
+	const plain = (used) => formatSnapshot({ kind: "zai", primary: { pct: used } }, { metric: "left" }).replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(plain(5), /5h 95% left$/, "numbers read as quota left, matching the bar");
 	assert.match(plain(95), /5h \u00a05% left$/, "low numbers are warnings, not comfort (percent column-padded)");
 });
@@ -381,7 +422,7 @@ test("gauge direction is unambiguous: a fuller bar is always the healthier windo
 /** Line LED tint = grade of the WORST window = the LOWEST quota left. */
 test("empty gauge cells stay dim, never the segment's hot tint (no inverted weight)", () => {
 	const seg = (used) => {
-		const text = formatSnapshot({ kind: "zai", primary: { pct: used }, fetchedAtMs: 1 }, { bars: 6, resets: false });
+		const text = formatSnapshot({ kind: "zai", primary: { pct: used }, fetchedAtMs: 1 }, { metric: "left", bars: 6, resets: false });
 		return text.slice(text.indexOf("5h"), text.indexOf("% left"));
 	};
 	assert.ok(!seg(0).includes("░"), "a full gauge draws no trough at all");
@@ -410,7 +451,7 @@ test("health LED tint tracks the worst window (lowest remaining)", () => {
 
 test("formatSnapshot renders parallel 5h/7d labels with draining fuel gauges", () => {
 	const snap = { kind: "codex", primary: { pct: 95 }, secondary: { pct: 15 }, fetchedAtMs: 1 };
-	const text = formatSnapshot(snap, { bars: 5, resets: false });
+	const text = formatSnapshot(snap, { metric: "left", bars: 5, resets: false });
 	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(plain, /^● 5h ▎░░░░ \u00a05% left │ 7d ████▎ 85% left$/, "an eighth-block floor keeps a hot sliver at 5% left");
 	assert.ok(!plain.includes("wk"), "weekly label is 7d (parallel durations)");
@@ -418,16 +459,29 @@ test("formatSnapshot renders parallel 5h/7d labels with draining fuel gauges", (
 	assert.ok(plain.includes("▎░░░░"), "5% left drains to one fractional cell, never a whole one");
 });
 
+test("both meters are normalized: identical gauge cell counts at every rung", () => {
+	const snap = { kind: "codex", primary: { pct: 88 }, secondary: { pct: 13 }, fetchedAtMs: 1 };
+	for (const bars of [8, 6, 5, 4, 3, 2]) {
+		const plain = formatSnapshot(snap, { bars, resets: false }).replace(/\u001b\[[0-9;]*m/g, "");
+		const [fiveHour, weekly] = plain.split(" │ ");
+		const cells = (seg) => (seg.match(/[█▏▎▍▌▋▊▉░]/g) ?? []).length;
+		assert.equal(cells(fiveHour), bars, `5h gauge has ${bars} cells`);
+		assert.equal(cells(weekly), bars, `7d gauge matches the 5h gauge at ${bars} cells`);
+	}
+	const bare = formatSnapshot(snap, { bars: 0, resets: false }).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.ok(!bare.includes("█") && !bare.includes("░"), "both gauges drop together");
+});
+
 test("density ladder is graded: bar cells step 6→5→4→3→0 before clocks drop", () => {
 	const snap = { kind: "codex", primary: { pct: 5, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
 	const cells = (d) => (formatSnapshot(snap, d).match(/[█▏▎▍▌▋▊▉░]/g) ?? []).length; // gauge cells, eighth-blocks included
-	assert.equal(cells({ bars: 6, resets: true }), 6);
-	assert.equal(cells({ bars: 5, resets: true }), 5);
-	assert.equal(cells({ bars: 4, resets: true }), 4);
-	assert.equal(cells({ bars: 3, resets: true }), 3);
-	const bare = formatSnapshot(snap, { bars: 0, resets: true }).replace(/\u001b\[[0-9;]*m/g, "");
+	assert.equal(cells({ metric: "left", bars: 6, resets: true }), 6);
+	assert.equal(cells({ metric: "left", bars: 5, resets: true }), 5);
+	assert.equal(cells({ metric: "left", bars: 4, resets: true }), 4);
+	assert.equal(cells({ metric: "left", bars: 3, resets: true }), 3);
+	const bare = formatSnapshot(snap, { metric: "left", bars: 0, resets: true }).replace(/\u001b\[[0-9;]*m/g, "");
 	assert.ok(bare.includes("🕐") && !bare.includes("█"), "clocks outlast bars");
-	const noClocks = formatSnapshot(snap, { bars: 3, resets: false }).replace(/\u001b\[[0-9;]*m/g, "");
+	const noClocks = formatSnapshot(snap, { metric: "left", bars: 3, resets: false }).replace(/\u001b\[[0-9;]*m/g, "");
 	assert.ok(noClocks.includes("█") && !noClocks.includes("🕐"), "bar+reset mix rung exists");
 });
 
@@ -450,7 +504,7 @@ test("alarm ladder: bold at 76% left, recess at 54, lit plate at 44, fuel never 
 	assert.ok(lit.includes("\u001b[38;2;0;0;0m"), "44% left inverts the number to black");
 	assert.ok(!lit.includes("\u001b[38;2;112;122;140m"), "no slate chrome inside a lit band");
 	const gauge = (used) => {
-		const t = formatSnapshot({ kind: "codex", primary: { pct: used }, fetchedAtMs: 1 }, { bars: 4, resets: false });
+		const t = formatSnapshot({ kind: "codex", primary: { pct: used }, fetchedAtMs: 1 }, { metric: "left", bars: 4, resets: false });
 		return t.slice(t.indexOf("5h"), t.indexOf("% left"));
 	};
 	assert.ok(!/\u001b\[38;2;0;0;0m[█▏▎▍▌▋▊▉]/.test(gauge(56)), "44% left never paints the fuel black");
@@ -469,7 +523,7 @@ test("formatSnapshot placeholder, reset suppression, dense quota-only", () => {
 	const pending = formatSnapshot(undefined);
 	assert.match(pending.replace(/\u001b\[[0-9;]*m/g, ""), /^quota ⋯$/);
 	const snap = { kind: "codex", primary: { pct: 42, resetsAtMs: FUTURE }, fetchedAtMs: 1 };
-	const bare = formatSnapshot(snap, { bars: 0, resets: false });
+	const bare = formatSnapshot(snap, { metric: "left", bars: 0, resets: false });
 	assert.equal(bare.replace(/\u001b\[[0-9;]*m/g, ""), "● 5h 58% left");
 });
 
@@ -548,8 +602,8 @@ test("QuotaPoller: header harvest updates codex windows instantly", () => {
 	// Synchronous harvest before the (failing) auth refresh settles.
 	p.harvestHeaders({ "x-codex-primary-used-percent": "58", "x-codex-secondary-used-percent": "21" });
 	const plain = last.replace(/\u001b\[[0-9;]*m/g, "");
-	assert.match(plain, /5h .*42% left/);
-	assert.match(plain, /7d .*79% left/);
+	assert.match(plain, /5h .*58% used/);
+	assert.match(plain, /7d .*21% used/);
 	assert.ok(!plain.includes("gpt-6-luna"), "status stays quota-only after header harvest");
 });
 
@@ -580,7 +634,7 @@ test("QuotaPoller: start/stop lifecycle renders then clears", async () => {
 // Reference unused export guard (keeps import list honest if bundle changes).
 test("status glyph vocabulary is width-accounted (🕐/⚡ 2 cells, rest 1)", () => {
 	const snap = { kind: "codex", primary: { pct: 42, resetsAtMs: FUTURE }, secondary: { pct: 12 }, fetchedAtMs: 1 };
-	const text = formatSnapshot(snap, { bars: 5, resets: true }) + formatLocalPill(METER);
+	const text = formatSnapshot(snap, { metric: "left", bars: 5, resets: true }) + formatLocalPill(METER);
 	const widths = { "│": 1, "🕐": 2, "⚡": 2, "·": 1, "⋯": 1, "█": 1, "░": 1, "●": 1, "○": 1, "⚠": 1 };
 	for (const ch of "▏▎▍▌▋▊▉") widths[ch] = 1; // eighth-block fill glyphs are narrow
 	for (const ch of text.replace(/\u001b\[[0-9;]*m/g, "")) {
@@ -683,13 +737,14 @@ test("composeStatusLine density ladder degrades monotonically: decoration never 
 		// clocks never come back once dropped, at any width below that rung
 		if (!clock) clockGone = true;
 		else assert.ok(!clockGone, `clocks reappeared at ${cols} cols after dropping out`);
-		assert.ok(line.includes("88% left"), `percents are never sacrificed (${cols} cols)`);
+		assert.ok(line.includes("12% used"), `percents are never sacrificed (${cols} cols)`);
 		assert.ok(visibleWidth(composeStatusLine(COMPOSE_SNAP, METER, cols)) <= Math.max(cols, 30), `fits ${cols}`);
 	}
 	assert.ok(plain(120).includes("█") && plain(120).includes("🕐"), "wide viewport: gauges + clocks");
 	assert.ok(plain(85).includes("█") && plain(85).includes("🕐"), "85 cols keeps gauges + clocks");
-	assert.ok(plain(70).includes("█") && plain(70).includes("🕐"), "70 cols still affords gauges once the pill lost its brackets");
-	assert.ok(!plain(60).includes("█") && plain(60).includes("🕐") && plain(60).includes("⚡"), "60 cols trades the gauge for the reset clock (the % implies fill, the clock does not)");
+	assert.ok(plain(85).includes("█") && plain(85).includes("🕐"), "85 cols keeps the gauge beside a compact pill");
+	assert.ok(plain(70).includes("█") && plain(70).includes("🕐") && plain(70).includes("⚡"), "70 cols keeps both meters, thinned, beside the reset clocks");
+	assert.ok(!plain(60).includes("█") && plain(60).includes("🕐") && plain(60).includes("⚡"), "60 cols trades the gauges for the reset clock (the % implies fill, the clock does not)");
 	assert.ok(!plain(45).includes("█") && !plain(45).includes("🕐") && plain(45).includes("⚡"), "45 cols: percents + a clockless pill");
 	assert.ok(!plain(30).includes("█") && !plain(30).includes("🕐"), "narrow viewport: percents only");
 	assert.ok(!plain(30).includes("⚡"), "pill sacrificed only when nothing fits beside it");
@@ -874,8 +929,8 @@ test("QuotaPoller: openai model renders via openai-codex fall-through (gpt-6.1-t
 		globalThis.fetch = realFetch;
 	}
 	const plain = last.replace(/\u001b\[[0-9;]*m/g, "");
-	assert.match(plain, /5h .*5% left/);
-	assert.match(plain, /7d .*85% left/);
+	assert.match(plain, /5h .*95% used/);
+	assert.match(plain, /7d .*15% used/);
 	assert.equal(n, 2, "both candidates were exercised");
 	p.stop();
 });
@@ -960,7 +1015,7 @@ test("formatSnapshot: threatened window flips clock to ⚠eta and LED escalates 
 		fresh: true,
 		primary: { ratePerHour: 60, etaMs: 16 * 60_000, threatensReset: true }, // cap in 16m -> bold red band
 	};
-	const text = formatSnapshot(snap, { bars: 6, resets: true }, style);
+	const text = formatSnapshot(snap, { metric: "left", bars: 6, resets: true }, style);
 	const plain = text.replace(/\u001b\[[0-9;]*m/g, "");
 	// the badge keeps the clock's field, right-aligned: pad on the LEFT so the row
 	// still ends on a visible glyph instead of trailing blanks
@@ -982,11 +1037,11 @@ test("formatSnapshot: widest rung prints the ⚠ time-to-cap AND the reset clock
 		primary: { ratePerHour: 60, etaMs: 16 * 60_000, threatensReset: true },
 	};
 	const plain = (d) => formatSnapshot(snap, d, style).replace(/\u001b\[[0-9;]*m/g, "");
-	const both = plain({ bars: 6, resets: true, threatClock: true });
+	const both = plain({ metric: "left", bars: 6, resets: true, threatClock: true });
 	assert.match(both, /16% left ⚠16m 🕐3h0m/, "velocity and recovery side by side");
 	assert.doesNotMatch(both, /\u00a0/, "no padding once both fields are printed");
 	// a calm window ignores the flag entirely
-	const calm = formatSnapshot(snap, { bars: 6, resets: true, threatClock: true }, { fresh: true }).replace(/\u001b\[[0-9;]*m/g, "");
+	const calm = formatSnapshot(snap, { metric: "left", bars: 6, resets: true, threatClock: true }, { fresh: true }).replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(calm, /🕐3h0m/);
 	assert.doesNotMatch(calm, /⚠/, "no badge without a threat");
 });
@@ -994,9 +1049,9 @@ test("formatSnapshot: widest rung prints the ⚠ time-to-cap AND the reset clock
 test("formatSnapshot: stale data renders hollow LED, non-threat keeps 🕐 and ramp", () => {
 	const now = Date.now();
 	const snap = mkSnap(84, { at: now, resetsAtMs: now + 3 * 3_600_000, secondaryPct: 16 });
-	const stale = formatSnapshot(snap, { bars: 6, resets: true }, { fresh: false });
+	const stale = formatSnapshot(snap, { metric: "left", bars: 6, resets: true }, { fresh: false });
 	assert.ok(stale.includes("○"), "hollow stale LED");
-	const fresh = formatSnapshot(snap, { bars: 6, resets: true }, { fresh: true });
+	const fresh = formatSnapshot(snap, { metric: "left", bars: 6, resets: true }, { fresh: true });
 	const plain = fresh.replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(plain, /● 5h/);
 	assert.match(plain, /🕐/, "unthreatened windows keep reset clocks");
@@ -1005,7 +1060,7 @@ test("formatSnapshot: stale data renders hollow LED, non-threat keeps 🕐 and r
 test("window text: washed bands redraw chrome in the plate ink, not sunk slate", () => {
 	const now = Date.now();
 	const snap = mkSnap(96, { at: now, resetsAtMs: now + 3_600_000 }); // 4% left -> lit plate
-	const line = formatSnapshot(snap, { bars: 4, resets: true });
+	const line = formatSnapshot(snap, { metric: "left", bars: 4, resets: true });
 	const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
 	assert.match(plain, /5h ▏░░░/);
 	assert.match(plain, /4% left 🕐1h0m/);
@@ -1016,18 +1071,18 @@ test("window text: washed bands redraw chrome in the plate ink, not sunk slate",
 
 test("window text: a spent window promotes its reset clock to the segment ink", () => {
 	const now = Date.now();
-	const line = formatSnapshot(mkSnap(100, { at: now, resetsAtMs: now + 1_800_000 }), { bars: 4, resets: true });
+	const line = formatSnapshot(mkSnap(100, { at: now, resetsAtMs: now + 1_800_000 }), { metric: "left", bars: 4, resets: true });
 	assert.ok(line.includes("\u001b[1m\u001b[38;2;0;0;0m 🕐"), "clock carries the bold segment ink");
 });
 
 test("window text: a firing threat badge inherits the clock's geometry", () => {
 	const now = Date.now();
 	const snap = mkSnap(16, { at: now, resetsAtMs: now + 3 * 3_600_000 });
-	const calm = formatSnapshot(snap, { bars: 6, resets: true }, {
+	const calm = formatSnapshot(snap, { metric: "left", bars: 6, resets: true }, {
 		fresh: true,
 		primary: { ratePerHour: 0.2, etaMs: undefined, threatensReset: false },
 	});
-	const hot = formatSnapshot(snap, { bars: 6, resets: true }, {
+	const hot = formatSnapshot(snap, { metric: "left", bars: 6, resets: true }, {
 		fresh: true,
 		primary: { ratePerHour: 20, etaMs: 16 * 60_000, threatensReset: true },
 	});

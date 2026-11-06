@@ -25,11 +25,11 @@
  *
  * Visual language (one right-justified quota group + one quiet left meter):
  *
- *   ⚡ 15.9M │ 360r          ● 5h ██████▏░░ 88% left 🕐3h20m │ 7d █████▉░ 70% left 🕐6d22h
+ *   ⚡ 15.9M │ 360r          ● 5h █▎░░░░░░ 12% used 🕐3h20m │ 7d ██▎░░░░░ 30% used 🕐6d22h
  *
- * Three ink levels only: chrome (tag, separator, the word `left`, the reset
+ * Three ink levels only: chrome (tag, separator, the metric word, the reset
  * clock) in dim slate, the gauge and the percent in the window's fuel tint, and
- * bold reserved as an escalation channel from 51% left down. Gauges use eighth
+ * bold reserved as an escalation channel once quota left falls below 51%. Gauges use eighth
  * blocks (▏▎▍▌▋▊▉) so a 13% window draws `▊` instead of overstating itself as a
  * whole cell, over a slate `░` track — the hatch reads as a tank whose level
  * has dropped, never as fuel, and it never borrows the segment's hot tint.
@@ -37,10 +37,11 @@
  * the group, and the left meter reuses the same `│` divider the windows use, so
  * both halves of the row speak one visual language.
  *
- * The two windows are deliberately asymmetric: the 5h window is the actionable
- * one (it turns over several times a day), so it owns the widest gauge, while
- * the weekly window is context and gets a shorter one, then none. Tinting
- * encodes LEVEL, never alarm — a comfortable 84% still looks comfortable.
+ * The two windows share one gauge cell count at every width: the meters are
+ * normalized so the 5h and weekly gauges always appear and thin together, never
+ * one-sided (a lone meter reads as if the other window had no bar at all).
+ * Tinting encodes LEVEL, never alarm — a comfortable 84% left still looks
+ * comfortable.
  *
  * Status line ownership: quota-helper composes the whole extension status row —
  * the persistent subagentx local-usage meter on the LEFT (`⚡ 15.9M │ 360r`, read
@@ -50,11 +51,11 @@
  * sorts first) absorbs subagentx's own plain-text meter twin invisibly; if
  * quota-helper ever hides (auth rejected / unsupported provider), the twin
  * resurfaces untouched and the meter never disappears. A graded density
- * ladder picks the widest variant that fits the remaining width: gauges at
- * 8/6→6/5→5/4→4/3→4/0→3/0→2/0 cells (primary/secondary) with clock resets,
- * then every gauge drops while the clocks stay, then the clocks
- * (`● 5h 88% left │ 7d 70% left`); percents and the word `left` survive every
- * rung, and the meter is sacrificed before the reading itself. Multi-factor
+ * ladder picks the widest variant that fits the remaining width: both gauges
+ * at 8→6→5→4→3→2 cells with clock resets, then every gauge drops while the
+ * clocks stay, then the clocks (`● 5h 88% used │ 7d 13% used`); percents and
+ * the metric word survive every rung, and the meter is sacrificed before the
+ * reading itself. Multi-factor
  * analysis layers three signals over the raw percents: the thirty-two-band
  * fuel-gauge ramp (bar length, tint and `% left` all derive from quota
  * REMAINING, running green → lime → amber → orange → pure red as the level
@@ -108,33 +109,19 @@ function readExtensionSettings(name: string): Record<string, unknown> {
 	}
 }
 
-/** Atomic merge-patch of one extension's block into settings.json; returns the merged block. */
-function writeExtensionSettings(name: string, patch: Record<string, unknown>): Record<string, unknown> {
-	const file = process.env.PI_EXTENSION_SETTINGS_PATH || path.join(agentDir(), "settings.json");
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-	let raw: any = {};
-	try { raw = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {};
-	const section = raw.extensionSettings && typeof raw.extensionSettings === "object" && !Array.isArray(raw.extensionSettings)
-		? raw.extensionSettings
-		: {};
-	const current = section[name];
-	raw.extensionSettings = {
-		...section,
-		[name]: {
-			...(current && typeof current === "object" && !Array.isArray(current) ? current : {}),
-			...patch,
-		},
-	};
-	fs.writeFileSync(tmp, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
-	fs.renameSync(tmp, file);
-	return raw.extensionSettings[name];
-}
-
 // ---------------------------------------------------------------------------
 // types
 // ---------------------------------------------------------------------------
+
+export type Metric = "used" | "left";
+
+/** Quota metric percent for a window, 0–100. `used` is the wire value; `left` is
+ * its complement. Every visual derives from ONE metric so the gauge, the number
+ * and the trailing word can never disagree. */
+export function metricPercent(usedPct: number, metric: Metric): number {
+	const used = Number.isFinite(usedPct) ? Math.min(100, Math.max(0, usedPct)) : 0;
+	return metric === "left" ? 100 - used : used;
+}
 
 export interface QuotaWindow {
 	/** Used percentage, 0–100 (exact ratio when the provider reports it). */
@@ -457,7 +444,7 @@ export function visibleWidth(text: string): number {
 }
 
 const GRAY = "\u001b[38;2;130;140;150m";
-/** Chrome tint: window tags, separators, the word `left`. Deliberately dull so
+/** Chrome tint: window tags, separators, the metric word. Deliberately dull so
  * the grade-tinted percent stays the one thing the eye locks onto. */
 const SLATE = "\u001b[38;2;112;122;140m";
 const DIM = "\u001b[2m";
@@ -873,13 +860,15 @@ function padPercent(leftPct: number): string {
 }
 
 export interface WindowStyle {
+	/** Metric the number and the gauge fill report. */
+	metric: Metric;
 	/** Gauge cells (0 = no gauge). */
 	bars: number;
 	/** Print the reset clock — and the ⚠ cap badge in its place when threatened. */
 	resets: boolean;
 	/** Print BOTH the ⚠ cap badge and the clock when a window is threatened. */
 	threatClock?: boolean;
-	/** Print the word `left` after the percent. */
+	/** Print the metric word after the percent. */
 	word?: boolean;
 	/** Burn-rate projection for this window. */
 	forecast?: WindowForecast;
@@ -889,14 +878,19 @@ export interface WindowStyle {
  *
  *   5h █████▊▁▁ 84% left 🕐3h48m
  *
- * Everything derives from the REMAINING percent, so bar, tint and number tell
- * the same story. A window projected to cap before its reset swaps the clock
+ * The number and the gauge fill follow the selected metric; the tint, the LED and
+ * the alarm channels stay keyed to the remaining percent, so severity can never
+ * invert with the metric. A window projected to cap before its reset swaps the clock
  * for a red `⚠16m` badge — an added channel rather than a repaint, because the
  * tint's contract is "how much is left" and a healthy 84% burning hot must
  * still look healthy while its badge shouts.
  */
 function windowText(tag: string, w: QuotaWindow, style: WindowStyle): string {
 	const left = leftPercent(w.pct);
+	// The band, the LED and the alarm channels stay keyed to quota LEFT —
+	// `left` answers "how much is left to burn", which is what tint escalates
+	// on. The printed number and the gauge fill follow the selected metric.
+	const shownPct = metricPercent(w.pct, style.metric);
 	const tone = quotaGrade(left);
 	const lit = tone.lit === true;
 	const on = `${tone.bold}${tone.color}${tone.wash ?? ""}`;
@@ -925,9 +919,9 @@ function windowText(tag: string, w: QuotaWindow, style: WindowStyle): string {
 	const clockBody = style.resets && w.resetsAtMs ? formatDuration(w.resetsAtMs - Date.now()) : "";
 	let text = `${tagInk}${tag}${RESET} `;
 	text += style.bars > 0
-		? `${barFor(left, style.bars, tone)} ${padPercent(left)}`
-		: `${tone.wash ?? ""}${on}${padPercent(left)}`;
-	if (style.word) text += `${quiet} left`;
+		? `${barFor(shownPct, style.bars, tone)} ${padPercent(shownPct)}`
+		: `${tone.wash ?? ""}${on}${padPercent(shownPct)}`;
+	if (style.word) text += `${quiet} ${style.metric}`;
 	if (style.forecast?.threatensReset && style.forecast.etaMs !== undefined) {
 		// cap projected BEFORE the reset: the actionable number is time-to-cap
 		const badge = `⚠${etaText(style.forecast.etaMs)}`;
@@ -950,44 +944,45 @@ function windowText(tag: string, w: QuotaWindow, style: WindowStyle): string {
 }
 
 /** Responsive density ladder, widest first, degrading MONOTONICALLY in every
- * dimension: the weekly gauge drops first, then gauge cells thin 8→2, then every
- * gauge goes while the reset clocks stay, then the clocks. Percents and the word
- * `left` survive every rung — they are the payload, not decoration. Gauges are
- * the first casualty because `% left` already implies fill, while the reset
- * stamp carries information the percentage cannot. A mark that disappears at
- * some width never returns at a narrower one, so resizing can never flicker the
- * footer between layouts. */
+ * dimension: both gauges thin 8→6→5→4→3→2 TOGETHER, then every gauge goes while
+ * the reset clocks stay, then the clocks. Percents and the metric word survive
+ * every rung — they are the payload, not decoration. The meters are normalized
+ * to one cell count so a narrowing terminal never leaves the 5h bar standing
+ * alone; gauges are still the first casualty because `% used` already implies
+ * fill, while the reset stamp carries information the percentage cannot. A mark
+ * that disappears at some width never returns at a narrower one, so resizing
+ * can never flicker the footer between layouts. */
 export interface DensityConfig {
-	/** Primary (5h) gauge cells. */
+	/** Metric to print and fill. Defaults to `used`. */
+	metric?: Metric;
+	/** Gauge cells — shared by the 5h and 7d meters. */
 	bars: number;
 	/** Clock resets (also gates the ⚠ cap badge). */
 	resets: boolean;
-	/** Secondary (7d) gauge cells; defaults to `bars`. */
-	secondaryBars?: number;
-	/** Print the word `left`; defaults to true. */
+	/** Print the metric word (`used`/`left`) after the percent; defaults to true. */
 	word?: boolean;
 	/** Print the ⚠ cap badge AND the reset clock side by side when threatened. */
 	threatClock?: boolean;
 }
 
 const DENSITY_LADDER: readonly DensityConfig[] = [
-	{ bars: 8, secondaryBars: 6, resets: true, word: true, threatClock: true },
-	{ bars: 8, secondaryBars: 6, resets: true, word: true },
-	{ bars: 6, secondaryBars: 5, resets: true, word: true },
-	{ bars: 5, secondaryBars: 4, resets: true, word: true },
-	{ bars: 4, secondaryBars: 3, resets: true, word: true },
-	{ bars: 4, secondaryBars: 0, resets: true, word: true },
-	{ bars: 3, secondaryBars: 0, resets: true, word: true },
-	{ bars: 2, secondaryBars: 0, resets: true, word: true },
-	{ bars: 0, secondaryBars: 0, resets: true, word: true },
-	{ bars: 0, secondaryBars: 0, resets: false, word: true },
+	{ bars: 8, resets: true, word: true, threatClock: true },
+	{ bars: 8, resets: true, word: true },
+	{ bars: 6, resets: true, word: true },
+	{ bars: 5, resets: true, word: true },
+	{ bars: 4, resets: true, word: true },
+	{ bars: 3, resets: true, word: true },
+	{ bars: 2, resets: true, word: true },
+	{ bars: 0, resets: true, word: true },
+	{ bars: 0, resets: false, word: true },
 ];
 
 /** One-line quota readout for the footer: dense quota-only, health LED, clock
- * resets. Both the percentage and the gauge cell count are quota LEFT (the
- * inverse of the wire `used_percent`), tinted by the fuel grade.
- * `● 5h ███████▏░░ 88% left 🕐3h20m │ 7d █████▉░ 70% left 🕐6d22h` at full
- * density, down to `● 5h 88% left │ 7d 70% left` (percents-only); a threatened
+ * resets. Number, word and gauge fill all report the selected metric
+ * (`used` by default); tint stays keyed to quota left. Both gauges always share
+ * one cell count, so the 5h and weekly meters appear and thin together.
+ * `● 5h ██▎░░░░░ 12% used 🕐3h20m │ 7d ██▎░░░░░ 30% used 🕐6d22h` at full
+ * density, down to `● 5h 12% used │ 7d 30% used` (percents-only); a threatened
  * window swaps its clock for `⚠1h05m`. Labels stay parallel (`5h` / `7d`, both
  * durations); the model name is deliberately omitted — the footer's left side
  * already shows it. */
@@ -1000,15 +995,17 @@ export interface SnapshotStyle {
 
 export function formatSnapshot(snap: QuotaSnapshot | undefined, density: DensityConfig = { bars: 0, resets: true }, style?: SnapshotStyle): string {
 	if (!snap) return `${GRAY}quota ⋯${RESET}`;
+	const metric: Metric = density.metric ?? "used";
 	const sep = `${GRAY} │ ${RESET}`;
 	const word = density.word !== false;
-	const secondaryBars = density.secondaryBars ?? density.bars;
+	// Both windows draw the same gauge: normalized meters, never one-sided.
+	const bars = density.bars;
 	const parts: string[] = [];
 	if (snap.primary) {
-		parts.push(windowText("5h", snap.primary, { bars: density.bars, resets: density.resets, word, threatClock: density.threatClock, forecast: style?.primary }));
+		parts.push(windowText("5h", snap.primary, { metric, bars, resets: density.resets, word, threatClock: density.threatClock, forecast: style?.primary }));
 	}
 	if (snap.secondary) {
-		parts.push(windowText("7d", snap.secondary, { bars: secondaryBars, resets: density.resets, word, threatClock: density.threatClock, forecast: style?.secondary }));
+		parts.push(windowText("7d", snap.secondary, { metric, bars, resets: density.resets, word, threatClock: density.threatClock, forecast: style?.secondary }));
 	}
 	const body = parts.length > 0 ? parts.join(sep) : `${GRAY}quota ⋯${RESET}`;
 	return healthDot(snap, style) + body;
@@ -1104,6 +1101,7 @@ export function composeStatusLine(
 	columns: number,
 	showResets = true,
 	trend?: TrendAnalysis,
+	metric: Metric = "used",
 ): string {
 	const pill = meter ? formatLocalPill(meter) : "";
 	const pillW = pill ? visibleWidth(pill) : 0;
@@ -1111,7 +1109,7 @@ export function composeStatusLine(
 		? { fresh: trend.fresh, primary: trend.primary, secondary: trend.secondary }
 		: undefined;
 	const ladder = (showResets ? DENSITY_LADDER : DENSITY_LADDER.map(d => ({ ...d, resets: false, threatClock: false }))).map(d =>
-		formatSnapshot(snap, d, style),
+		formatSnapshot(snap, { ...d, metric }, style),
 	);
 	if (pill) {
 		// Pill-major: hold the meter at full fidelity while any rung still fits
@@ -1191,6 +1189,8 @@ export interface QuotaConfig {
 	enabled: boolean;
 	intervalMs: number;
 	showResets: boolean;
+	/** Which quota metric the footer reports; `used` is the default. */
+	metric: Metric;
 	/** Burn-rate prediction layer (multi-factor trend analysis). */
 	predictions: boolean;
 }
@@ -1201,6 +1201,7 @@ export function readConfig(block: Record<string, unknown>): QuotaConfig {
 		enabled: block.enabled !== false,
 		intervalMs: Math.min(Math.max(interval, 5_000), 600_000),
 		showResets: block.showResets !== false,
+		metric: block.metric === "left" ? "left" : "used",
 		predictions: block.predictions !== false,
 	};
 }
@@ -1353,6 +1354,7 @@ export class QuotaPoller {
 				cols,
 				this.cfg.showResets,
 				this.cfg.predictions ? trend : { fresh: trend.fresh },
+				this.cfg.metric,
 			),
 		);
 	}
@@ -1437,34 +1439,19 @@ export default function quotaHelper(pi: ExtensionAPI): void {
 		},
 	});
 
-	// Settings-first auth-file path: settings.json:extensionSettings.quotaHelper.authFile
-	// wins; the legacy PI_QUOTA_HELPER_AUTH / PI_ROUTER_AUTH environment paths remain as
-	// fallbacks, then the default <agentDir>/auth.json.
-	pi.registerCommand("settings:quota-helper", {
-		description:
-			"[u] (settings.json:extensionSettings.quotaHelper) Quota auth-file settings — " +
-			"/settings:quota-helper [show|set authFile <path>|reset authFile]",
-		handler: async (args, ctx) => {
-			const input = String(args ?? "").trim();
-			const set = /^set\s+authFile\s+([\s\S]+)$/i.exec(input);
-			if (set) {
-				const value = set[1].trim().replace(/^(["'])(.*)\1$/, "$2");
-				if (!value || /[\0\r\n]/.test(value)) {
-					ctx.ui.notify("authFile must be a non-empty single-line path.", "error");
-					return;
-				}
-				writeExtensionSettings("quotaHelper", { authFile: path.resolve(value) });
-			} else if (/^reset\s+authFile$/i.test(input)) {
-				writeExtensionSettings("quotaHelper", { authFile: undefined });
-			} else if (input && !/^show$/i.test(input)) {
-				ctx.ui.notify("Usage: /settings:quota-helper [show|set authFile <path>|reset authFile]", "warning");
-				return;
-			}
-			const current = readExtensionSettings("quotaHelper");
-			ctx.ui.notify(
-				`quota-helper authFile: ${typeof current.authFile === "string" && current.authFile.trim() ? `${current.authFile} [u]` : "(fallback: env or default auth.json)"} — effective: ${authFilePath()}`,
-				"info",
-			);
-		},
+	// Config surfaces in the unified /settings UI (util-settings) via the shared schema bus.
+	pi.events?.on?.("settings:schemas", (sink: unknown[]) => {
+		sink.push({
+			name: "quotaHelper",
+			title: "Quota helper",
+			fields: [
+				{ key: "metric", label: "Metric", type: "choice", values: ["used", "left"], desc: "Quota figure and gauge fill. `used` (default) counts up as the window burns; `left` counts down. Both meters are always shown." },
+				{ key: "authFile", label: "Auth file", type: "path", desc: "Router auth.json path; empty = PI_QUOTA_HELPER_AUTH / PI_ROUTER_AUTH env, then <agentDir>/auth.json.", validate: (value: unknown) => {
+					const file = String(value);
+					if (!file || /[\0\r\n]/.test(file)) throw new Error("authFile must be a non-empty single-line path.");
+					return path.resolve(file);
+				} },
+			],
+		});
 	});
 }

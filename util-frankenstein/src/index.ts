@@ -1,7 +1,7 @@
 /**
  * util-frankenstein — sequential A1:L2 model interleave as a Pi virtual model.
  *
- * Registers `frankenstein/auto`, which dispatches every routed provider call in
+ * Registers `openai-codex/auto`, which dispatches every routed provider call in
  * a fixed repeating cycle across two physical OpenAI Codex models:
  *
  *   slot 0 → openai-codex/gpt-6-astra at reasoning "high"
@@ -28,12 +28,19 @@
  * dispatch pair; it never rewrites history.
  *
  * Commands:
- *   /frankenstein on      switch the session to frankenstein/auto, saving the
+ *   /frankenstein on      switch the session to openai-codex/auto, saving the
  *                         current model + thinking level as the restore point
  *   /frankenstein off     restore the saved model + level (fallback: astra/high)
  *   /frankenstein status  cycle position, dispatch log and restore point
- * Selecting `frankenstein/auto` via /model also activates it; switching away
+ * Selecting `openai-codex/auto` via /model also activates it; switching away
  * manually deactivates and drops the restore point.
+ *
+ * The virtual model lives under the PHYSICAL provider (not a standalone
+ * `frankenstein` provider) because Pi's startup resolver honours a saved
+ * `defaultProvider` only when that provider has configured auth. A credential-
+ * less provider id therefore fell through to the first available model on every
+ * launch, silently disabling the rotation. Under openai-codex it inherits the
+ * codex credential and is selected at startup like any other model.
  */
 
 import type {
@@ -43,11 +50,12 @@ import type {
 	ModelRouteRequest,
 } from "@earendil-works/pi-coding-agent";
 
-const VIRTUAL_PROVIDER = "frankenstein";
+const VIRTUAL_PROVIDER = "openai-codex";
 const VIRTUAL_ID = "auto";
 const VIRTUAL_REF = `${VIRTUAL_PROVIDER}/${VIRTUAL_ID}`;
 
 const PHYS_PROVIDER = "openai-codex";
+// Listed under the physical provider on purpose — see the module header.
 const ASTRA_ID = "gpt-6-astra";
 const LUNA_ID = "gpt-6-luna";
 const ASTRA_LEVEL = "high" as const;
@@ -84,6 +92,9 @@ const log: Dispatch[] = [];
 function isVirtual(model: { provider: string; id: string }): boolean {
 	return model.provider === VIRTUAL_PROVIDER && model.id === VIRTUAL_ID;
 }
+
+/** Provider id retired when the virtual model moved under openai-codex. */
+const LEGACY_PROVIDER = "frankenstein";
 
 function phys(ctx: ExtensionContext, id: string): NonNullable<ReturnType<ExtensionContext["modelRegistry"]["find"]>> {
 	const model = ctx.modelRegistry.find(PHYS_PROVIDER, id);
@@ -126,6 +137,18 @@ export default function (pi: ExtensionAPI) {
 			record(slot, `${PHYS_PROVIDER}/${pick.id}`, pick.level, request.reason);
 			return { model, thinkingLevel: pick.level, state: { slot: slot + 1 } };
 		},
+	});
+
+	// A resumed session may still name the retired `frankenstein/auto` provider.
+	// Pi cannot route it, so it would silently fall back to whichever physical
+	// model answered last; map it onto the registered virtual model instead.
+	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.model?.provider !== LEGACY_PROVIDER || ctx.model.id !== VIRTUAL_ID) return;
+		const virtual = ctx.modelRegistry.find(VIRTUAL_PROVIDER, VIRTUAL_ID);
+		if (!virtual) return;
+		programmatic = true;
+		const ok = await ctx.setModel(virtual);
+		if (!ok) programmatic = false;
 	});
 
 	pi.on("model_select", (event) => {

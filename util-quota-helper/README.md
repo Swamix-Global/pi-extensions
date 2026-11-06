@@ -4,7 +4,7 @@ Shows the **active model's provider quota** — 5-hour rolling window + weekly w
 percentages in Pi's footer status bar, **right-justified** to the terminal width.
 
 ```
-⚡ 15.9M │ 360r        ● 5h ██████▊░ 84% left 🕐3h20m │ 7d ▊░░░░░ 13% left 🕐6d20h
+⚡ 15.9M │ 360r        ● 5h ██████▊░ 84% used 🕐3h20m │ 7d █░░░░░░░ 13% used 🕐6d20h
 ```
 
 The widget follows model selection (`/model`, `Ctrl+P`): switching providers retargets
@@ -51,12 +51,16 @@ provider renders no status.
 
 ## Rendering
 
-Every number, gauge cell and tint speaks **quota left** — the complement of the wire
-`used_percent` that the provider sends and `/quota` reports as *used*. A long green bar
-therefore always means plenty; nothing has to be read inside-out.
+**`used` is the default metric**: the printed number, the gauge fill and the trailing word
+all report quota *consumed*, so a rising bar and a rising percent agree and the wire
+`used_percent` is shown as-is. Both meters (5h + 7d) always print — the metric only flips
+their direction. Escalation tint is the one channel that stays keyed to quota LEFT, so a
+nearly-spent window is the loud red one under either metric. Set `metric: "left"` for the
+classic fuel-tank readout (long green bar = plenty; nothing read inside-out).
 
 ```
-● 5h ██████▊░ 84% left 🕐3h20m │ 7d ▊░░░░░ 13% left 🕐6d20h
+● 5h ██░░░░░░ 16% used 🕐3h20m │ 7d █░░░░░░░ 13% used 🕐6d20h      (default)
+● 5h ██████▊░ 84% left 🕐3h20m │ 7d ███████░ 87% left 🕐6d20h      (metric: "left")
      └ gauge ┘ └ percent ┘ └ clk ┘   └ gauge ┘ └ percent ┘ └ clk ┘
 ```
 
@@ -94,21 +98,22 @@ bold ink, because recovery time is then the only actionable fact.
 
 | Rung | 5h gauge | 7d gauge | Clocks | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | 8 | 6 | 🕐 | ⚠ cap badge and clock side by side |
-| 2 | 8 | 6 | 🕐 | |
-| 3 | 6 | 5 | 🕐 | |
-| 4 | 5 | 4 | 🕐 | |
-| 5 | 4 | 3 | 🕐 | |
-| 6 | 4 | 0 | 🕐 | weekly gauge dropped |
-| 7 | 3 | 0 | 🕐 | |
-| 8 | 2 | 0 | 🕐 | |
-| 9 | 0 | 0 | 🕐 | `● 5h 88% left 🕐3h20m │ 7d 70% left 🕐6d22h` |
-| 10 | 0 | 0 | — | `● 5h 88% left │ 7d 70% left` |
+| 1 | 8 | 8 | 🕐 | ⚠ cap badge and clock side by side |
+| 2 | 8 | 8 | 🕐 | |
+| 3 | 6 | 6 | 🕐 | |
+| 4 | 5 | 5 | 🕐 | |
+| 5 | 4 | 4 | 🕐 | both meters survive 70 cols |
+| 6 | 3 | 3 | 🕐 | |
+| 7 | 2 | 2 | 🕐 | |
+| 8 | 0 | 0 | 🕐 | `● 5h 12% used 🕐3h20m │ 7d 30% used 🕐6d22h` |
+| 9 | 0 | 0 | — | `● 5h 12% used │ 7d 30% used` |
 
-Degradation is monotone in every dimension: gauges thin, then drop, then the clocks go.
-Percents and the word `left` survive every rung — they are the payload, not decoration.
-The meter is sacrificed before the reading itself. Composition is width-exact at every
-step (never wraps, never truncates), reconsidered on terminal resize.
+Degradation is monotone in every dimension: both gauges thin together, then drop
+together, then the clocks go. The meters are normalized to one cell count so the 5h and
+weekly bars are never one-sided: if a gauge is shown, both are shown. Percents and the
+metric word survive every rung — they are the payload, not decoration. The meter is
+sacrificed before the reading itself. Composition is width-exact at every step (never
+wraps, never truncates), reconsidered on terminal resize.
 
 ### Multi-factor analysis
 
@@ -117,7 +122,7 @@ from 40 % about to run dry:
 
 | Signal | Meaning | Channel |
 | --- | --- | --- |
-| remaining quota | how much is left | gauge length, tint, percent |
+| remaining quota | how much is left | tint, percent, reset urgency |
 | burn-rate forecast | rolling least-squares velocity over the sample history; a window projected to hit its cap **before** it resets swaps its clock for a red `⚠1h05m` badge | badge only — the percent keeps answering *how much is left*, so a healthy 84 % burning hot still looks healthy |
 | staleness | newest sample older than 3 poll intervals | LED turns hollow `○` |
 
@@ -144,6 +149,7 @@ local meter.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Set `false` to disable entirely |
+| `metric` | `"used"` | Quota figure, gauge fill and trailing word: `used` counts up as the window burns, `left` counts down. Both meters always print and always share one gauge cell count; tint escalation stays keyed to quota left. |
 | `intervalMs` | `30000` | Poll interval, clamped to 5000–600000 |
 | `showResets` | `true` | Append `🕐…` reset countdowns (and the `⚠` cap badge) to the status line |
 | `predictions` | `true` | Burn-rate prediction layer; `false` keeps the same ladder without a performance track record |
