@@ -38,19 +38,31 @@ clear error so the model falls back to asking in prose.
 
 ## Attention sound
 
-When a question is triggered, a short synthesized WAV
-(`assets/question-beep.wav` — a smooth futuristic rising chirp with harmonic
-shimmer and stereo echo tails, 1.15s @ 48kHz) plays through the native audio
-stack: `paplay` → `aplay` → `ffplay` (on WSLg, PulseAudio routes to the
-Windows host speakers). The beep repeats every 10 seconds while the question
-is unfocused; the first keypress or questionnaire completion silences it.
+When a question is triggered, a short WAV chime plays through the native audio
+stack: `paplay` → `aplay` → `ffplay` (on WSLg, PulseAudio routes to the Windows
+host speakers). The chime repeats every 10 seconds while the question is
+unfocused; the first keypress or questionnaire completion silences it.
 
-| Environment variable | Effect |
+Five bundled variants live in `assets/sounds/`:
+
+| Sound | Character |
 | --- | --- |
-| `PI_QUESTIONNAIRE_SOUND=off` | disable the attention sound |
-| `PI_QUESTIONNAIRE_SOUND_WAV=<path>` | override the WAV asset location |
-| `PI_QUESTIONNAIRE_SOUND_INTERVAL_MS=<n>` | override the 10s repeat interval |
-| `PI_QUESTIONNAIRE_SOUND_DEBUG=<file>` | append JSONL play events for diagnosis |
+| `chirp` | smooth futuristic rising chirp with harmonic shimmer (default) |
+| `pulse` | sci-fi sub-bass thump with airy tail |
+| `orchestral` | detuned string-section swell in D major |
+| `glass` | FM glass bell arpeggio |
+| `harp` | plucked harp arpeggio over warm pad |
+
+All configuration lives in `settings.json` under
+`extensionSettings.utilQuestionnaire` — managed via the `/settings:util-questionnaire`
+command (no environment variables):
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `sound` | `"chirp"` | one of the five variants above, or `"off"` to disable |
+| `soundPath` | (bundled) | absolute path to a custom WAV, overrides `sound` |
+| `intervalMs` | `10000` | repeat interval while unfocused (min 50) |
+| `debug` | (off) | file path for JSONL play events; `"off"` disables |
 
 ## Build & deploy
 

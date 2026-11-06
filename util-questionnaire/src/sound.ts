@@ -1,21 +1,7 @@
 /**
- * Attention sound for questionnaire triggers.
- *
- * As soon as a question is shown, a short synthesized WAV ("question-beep.wav",
- * a smooth futuristic rising chirp with harmonic shimmer and stereo echo tails)
- * is played through the native audio stack — PulseAudio first (paplay, which on
- * WSLg routes to the Windows host speakers), then raw ALSA (aplay), then SDL
- * (ffplay). The beep repeats every 10 seconds while the user hasn't focused the
- * UI; the first keypress or questionnaire completion stops it.
- *
- * Environment:
- *   PI_QUESTIONNAIRE_SOUND=off        disable the attention sound entirely
- *   PI_QUESTIONNAIRE_SOUND_WAV=<path> override the WAV asset location
- *   PI_QUESTIONNAIRE_SOUND_INTERVAL_MS=n  override the 10s repeat interval
- *   PI_QUESTIONNAIRE_SOUND_DEBUG=<file>   append JSONL play events for diagnosis
- *
- * Playback is strictly fire-and-forget: every failure path degrades to silence
- * and can never break the questionnaire itself.
+ * Questionnaire attention chimes configured in settings.json under
+ * extensionSettings.utilQuestionnaire; see /settings:util-questionnaire.
+ * All bundled WAVs live together in assets/sounds/.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -24,17 +10,43 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_REPEAT_MS = 10_000;
+import { readExtensionSettings } from "./extension-settings";
 
-interface Player {
-	name: string;
-	cmd: string;
-	args(file: string): string[];
+const DEFAULT_REPEAT_MS = 10_000;
+const SETTINGS_NAME = "utilQuestionnaire";
+
+/** Bundled sound variants kept in assets/sounds/ — order is the picker order. */
+export const SOUND_NAMES = ["chirp", "pulse", "orchestral", "glass", "harp"] as const;
+export type SoundName = (typeof SOUND_NAMES)[number];
+
+export interface SoundConfig {
+	sound: SoundName | "off";
+	soundPath: string;
+	intervalMs: number;
+	debug: string;
+}
+
+export function soundConfig(): SoundConfig {
+	const settings = readExtensionSettings(SETTINGS_NAME);
+	const raw = typeof settings.sound === "string" ? settings.sound.toLowerCase().trim() : "chirp";
+	const sound: SoundName | "off" =
+		raw === "off"
+			? "off"
+			: (SOUND_NAMES as readonly string[]).includes(raw)
+				? (raw as SoundName)
+				: "chirp";
+	const interval = typeof settings.intervalMs === "number" ? settings.intervalMs : DEFAULT_REPEAT_MS;
+	return {
+		sound,
+		soundPath: typeof settings.soundPath === "string" ? settings.soundPath.trim() : "",
+		intervalMs: Number.isFinite(interval) && interval > 0 ? Math.max(50, interval) : DEFAULT_REPEAT_MS,
+		debug: typeof settings.debug === "string" && settings.debug !== "off" ? settings.debug.trim() : "",
+	};
 }
 
 function debug(event: string, extra: Record<string, unknown> = {}): void {
-	const logFile = process.env.PI_QUESTIONNAIRE_SOUND_DEBUG;
-	if (!logFile || logFile === "0") return;
+	const logFile = soundConfig().debug;
+	if (!logFile) return;
 	try {
 		mkdirSync(dirname(logFile), { recursive: true });
 		appendFileSync(logFile, JSON.stringify({ ts: new Date().toISOString(), event, ...extra }) + "\n");
@@ -43,20 +55,16 @@ function debug(event: string, extra: Record<string, unknown> = {}): void {
 	}
 }
 
-function soundDisabled(): boolean {
-	const v = (process.env.PI_QUESTIONNAIRE_SOUND ?? "").toLowerCase();
-	return v === "0" || v === "off" || v === "false";
-}
-
-function resolveWav(): string | null {
+/** Bundled variant WAV for a sound name, or the soundPath override. */
+function resolveWav(sound: SoundName, soundPath: string): string | null {
 	const candidates: string[] = [];
-	if (process.env.PI_QUESTIONNAIRE_SOUND_WAV) candidates.push(process.env.PI_QUESTIONNAIRE_SOUND_WAV);
+	if (soundPath) candidates.push(soundPath);
 	try {
-		candidates.push(fileURLToPath(new URL("../assets/question-beep.wav", import.meta.url)));
+		candidates.push(fileURLToPath(new URL(`../assets/sounds/${sound}.wav`, import.meta.url)));
 	} catch {
 		/* non-file module URL */
 	}
-	candidates.push(join(homedir(), ".pi/agent/extensions/util-questionnaire/assets/question-beep.wav"));
+	candidates.push(join(homedir(), `.pi/agent/extensions/util-questionnaire/assets/sounds/${sound}.wav`));
 	return candidates.find((p) => existsSync(p)) ?? null;
 }
 
@@ -66,10 +74,14 @@ function resolvePlayer(): Player | null {
 	const has = (bin: string) => dirs.some((d) => existsSync(join(d, bin)));
 	if (has("paplay")) return { name: "paplay", cmd: "paplay", args: (f) => [f] };
 	if (has("aplay")) return { name: "aplay", cmd: "aplay", args: (f) => ["-q", f] };
-	if (has("ffplay")) {
-		return { name: "ffplay", cmd: "ffplay", args: (f) => ["-nodsp", "-autoexit", "-loglevel", "quiet", f] };
-	}
+	if (has("ffplay")) return { name: "ffplay", cmd: "ffplay", args: (f) => ["-nodsp", "-autoexit", "-loglevel", "quiet", f] };
 	return null;
+}
+
+interface Player {
+	name: string;
+	cmd: string;
+	args(file: string): string[];
 }
 
 export interface AttentionLoop {
@@ -79,15 +91,15 @@ export interface AttentionLoop {
 const noopLoop: AttentionLoop = { stop() {} };
 
 export function createAttentionLoop(): AttentionLoop {
-	if (soundDisabled()) return noopLoop;
-	const wav = resolveWav();
+	const cfg = soundConfig();
+	if (cfg.sound === "off") return noopLoop;
+	const wav = resolveWav(cfg.sound, cfg.soundPath);
 	const player = resolvePlayer();
 	if (!wav || !player) {
-		debug("unavailable", { wav, player: player?.name ?? null });
+		debug("unavailable", { wav, player: player?.name ?? null, sound: cfg.sound });
 		return noopLoop;
 	}
 
-	const repeatMs = Math.max(50, Number(process.env.PI_QUESTIONNAIRE_SOUND_INTERVAL_MS) || DEFAULT_REPEAT_MS);
 	let stopped = false;
 	let current: ChildProcess | null = null;
 	let plays = 0;
@@ -106,9 +118,9 @@ export function createAttentionLoop(): AttentionLoop {
 		}
 	};
 
-	debug("begin", { wav, player: player.name, repeatMs });
+	debug("begin", { wav, player: player.name, repeatMs: cfg.intervalMs, sound: cfg.sound });
 	beep();
-	const timer = setInterval(beep, repeatMs);
+	const timer = setInterval(beep, cfg.intervalMs);
 	timer.unref?.();
 
 	return {
@@ -117,7 +129,7 @@ export function createAttentionLoop(): AttentionLoop {
 			stopped = true;
 			clearInterval(timer);
 			debug("stop", { plays });
-			// Let an in-flight beep ring out (~1.2s) rather than click off mid-sample.
+			// Let an in-flight chime ring out rather than click off mid-sample.
 		},
 	};
 }

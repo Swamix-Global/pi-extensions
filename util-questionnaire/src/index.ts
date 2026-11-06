@@ -9,7 +9,7 @@
  * back to asking in prose.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
 	type EditorTheme,
@@ -21,7 +21,8 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-import { createAttentionLoop } from "./sound";
+import { readExtensionSettings, writeExtensionSettings } from "./extension-settings";
+import { createAttentionLoop, SOUND_NAMES } from "./sound";
 
 const PAGE_SIZE = 9; // digits 1-9 address every visible option
 const MAX_QUESTIONS = 10;
@@ -108,7 +109,75 @@ function answerSummary(a: Answer): string {
 
 // --- extension ---------------------------------------------------------------
 
+const SETTINGS_NAME = "utilQuestionnaire";
+const DEFAULT_INTERVAL_MS = 10_000;
+
+function registerSettingsCommand(pi: ExtensionAPI): void {
+	try {
+		pi.registerCommand?.("settings:util-questionnaire", {
+		description:
+			"[u] (settings.json:extensionSettings.utilQuestionnaire) Questionnaire sound settings — " +
+			"/settings:util-questionnaire [sound <name|off>|interval <ms>|soundPath <path|off>|debug <path|off>]",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const state = readExtensionSettings(SETTINGS_NAME);
+			const currentSound = typeof state.sound === "string" ? state.sound : "chirp";
+			const currentInterval = typeof state.intervalMs === "number" ? state.intervalMs : DEFAULT_INTERVAL_MS;
+			const currentPath = typeof state.soundPath === "string" ? state.soundPath : "";
+			const currentDebug = typeof state.debug === "string" && state.debug !== "off" ? state.debug : "off";
+			const parts = String(args ?? "").trim().split(/\s+/).filter(Boolean);
+
+			if (!parts.length) {
+				ctx.ui.notify(
+					`Questionnaire: sound=${currentSound}, interval=${currentInterval}ms, ` +
+						`soundPath=${currentPath || "bundled"}, debug=${currentDebug}. ` +
+						`Sounds: ${SOUND_NAMES.join(", ")}, off.`,
+					"info",
+				);
+				return;
+			}
+
+			const key = parts[0].toLowerCase();
+			const value = parts.slice(1).join(" ").replace(/^(["'])(.*)\1$/, "$2");
+			if (key === "sound") {
+				const selected = value.toLowerCase();
+				if (selected !== "off" && selected !== "default" && !(SOUND_NAMES as readonly string[]).includes(selected)) {
+					ctx.ui.notify(`Invalid sound "${value}". Choose ${SOUND_NAMES.join(", ")}, off, or default.`, "warning");
+					return;
+				}
+				const sound = selected === "default" ? "chirp" : selected;
+				writeExtensionSettings(SETTINGS_NAME, { sound });
+				ctx.ui.notify(`Questionnaire sound: ${sound} [u]`, "info");
+				return;
+			}
+			if (key === "interval") {
+				const intervalMs = value.toLowerCase() === "default" ? DEFAULT_INTERVAL_MS : Number(value);
+				if (!Number.isFinite(intervalMs) || intervalMs < 50) {
+					ctx.ui.notify("Interval must be at least 50 milliseconds (or use default).", "warning");
+					return;
+				}
+				writeExtensionSettings(SETTINGS_NAME, { intervalMs });
+				ctx.ui.notify(`Questionnaire sound repeat: ${intervalMs}ms [u]`, "info");
+				return;
+			}
+			if (key === "soundpath" || key === "debug") {
+				const settingKey = key === "soundpath" ? "soundPath" : "debug";
+				const settingValue = !value || value.toLowerCase() === "off" || value.toLowerCase() === "default" ? "" : value;
+				writeExtensionSettings(SETTINGS_NAME, { [settingKey]: settingValue });
+				ctx.ui.notify(`Questionnaire ${settingKey}: ${settingValue || "off"} [u]`, "info");
+				return;
+			}
+
+			ctx.ui.notify(
+				`Usage: /settings:util-questionnaire [sound <${SOUND_NAMES.join("|")}|off|default>|interval <ms|default>|soundPath <path|off>|debug <path|off>]`,
+				"warning",
+			);
+		},
+		});
+	} catch {}
+}
+
 export default function questionnaire(pi: ExtensionAPI) {
+	registerSettingsCommand(pi);
 	pi.registerTool({
 		name: "questionnaire",
 		label: "Questionnaire",

@@ -30,8 +30,33 @@ installation, follow the [package installation guide](tool-scripting/README.md#i
 paths, so the deployed folder is `package.json` + `build/<name>.js`.
 
 Requirements: Pi with the `extensionSettings` API; [Bun](https://bun.sh) for builds; Node 22+
-for tests. Settings live in `settings.json:extensionSettings.<name>`; each package carries
-its own inlined `src/extension-settings.ts` helper (no shared lib import at runtime).
+for tests. Settings live in `settings.json:extensionSettings.<name>`; packages inline their
+settings access (no shared runtime helper import).
+
+## Settings-first paths and environment exceptions
+
+Use `/settings:<extension>` commands rather than environment variables for user-configurable
+paths. Explicit settings values take precedence; `reset` removes the setting and restores the
+legacy environment/default lookup order.
+
+| Extension setting | Command | Legacy environment fallback |
+| --- | --- | --- |
+| `toolScripting.uvBinary` | `/settings:tool-scripting set uvBinary <executable>` / `reset uvBinary` | `UV_BIN` |
+| `subagentx.dataDir` | `/settings:subagentx set dataDir <directory>` / `reset dataDir` | `PI_SUBAGENTX_DATA_DIR` |
+| `subagentx.filemapBundle` | `/settings:subagentx set filemapBundle <file>` / `reset filemapBundle` | `PI_FILEMAP_BUNDLE` |
+| `quotaHelper.authFile` | `/settings:quota-helper set authFile <file>` / `reset authFile` | `PI_QUOTA_HELPER_AUTH`, then `PI_ROUTER_AUTH` |
+
+Each command also accepts `show`. `uvBinary` must point to an existing executable; `dataDir`
+may be a not-yet-created directory; `filemapBundle` must name an existing file; `authFile`
+accepts a non-empty path. `filemapBundle` configures SubagentX's existing optional `-e` bundle
+injection; there is no separate `filemap.bundle` setting.
+
+The remaining environment-only inputs are infrastructure or credentials, not user preferences:
+`PATH` and `HOME` affect process/path resolution; `PI_CODING_AGENT_DIR` selects Pi's agent
+directory; `PI_EXTENSION_SETTINGS_PATH` redirects the settings file (primarily for isolated
+tests). `tool-search` keeps provider API credentials in `DEEPSEEK_API_KEY` / `DEEPSEEK_KEY`,
+`BRAVE_API_KEY`, `PERPLEXITY_API_KEY` / `PPLX_API_KEY` as secret inputs; those keys can also
+come from its settings block or `auth.json` and are intentionally not migrated as preferences.
 
 ## Layout
 

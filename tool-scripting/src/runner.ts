@@ -220,7 +220,7 @@ export async function runScript(
 					type: "text",
 					text:
 						`${adapter.prefix} uv not found. Install it (curl -LsSf https://astral.sh/uv/install.sh | sh) ` +
-						"or set UV_BIN to the uv binary, then retry.",
+						"or set it via /settings:tool-scripting set uvBinary <executable>, then retry.",
 				},
 			],
 			details: { ...blockedDetails(adapter, name), status: "uv-missing" },

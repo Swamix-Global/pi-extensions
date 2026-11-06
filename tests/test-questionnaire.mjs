@@ -35,12 +35,25 @@ const mod = await jiti.import(pathToFileURL(extFile).href);
 const { visibleWidth } = await jiti.import(path.join(piDeps, "pi-tui"));
 
 const tools = {};
-mod.default({ registerTool: (t) => (tools[t.name] = t) });
+const commands = {};
+mod.default({
+	registerTool: (t) => (tools[t.name] = t),
+	registerCommand: (name, spec) => (commands[name] = spec),
+});
 const tool = tools.questionnaire;
 
-// Keep the existing flow tests silent: the attention beep fires on every
-// TUI-mode execute; sound behavior gets its own dedicated suite below.
-process.env.PI_QUESTIONNAIRE_SOUND = "off";
+// Hermetic settings: every test drives config through settings.json (the same
+// file pi reads), redirected via PI_EXTENSION_SETTINGS_PATH. Flow tests keep the
+// attention sound off; the sound suite rewrites the block per scenario.
+const settingsFile = path.join(mkdtempSync(path.join(os.tmpdir(), "q-settings-")), "settings.json");
+process.env.PI_EXTENSION_SETTINGS_PATH = settingsFile;
+function writeSettings(sound = "off", extra = {}) {
+	writeFileSync(
+		settingsFile,
+		JSON.stringify({ extensionSettings: { utilQuestionnaire: { sound, ...extra } } }, null, 2),
+	);
+}
+writeSettings();
 
 // --- fake theme / keyboard / tui ----------------------------------------------
 
@@ -390,46 +403,44 @@ function restoreEnv(saved) {
 	}
 }
 
+const settingsCommand = () => commands["settings:util-questionnaire"];
+const silentCtx = { ui: { notify: (msg, level) => notices.push({ msg, level }) } };
+const notices = [];
+
 describe("attention sound", () => {
-	const srcWav = path.resolve(
+	const soundsDir = path.resolve(
 		path.dirname(fileURLToPath(import.meta.url)),
 		"..",
 		"util-questionnaire",
 		"assets",
-		"question-beep.wav",
+		"sounds",
 	);
+	const SOUND_NAMES = ["chirp", "pulse", "orchestral", "glass", "harp"];
 
-	it("ships a valid 48kHz stereo PCM WAV next to the bundle (source and deployed)", () => {
-		for (const file of [
-			srcWav,
-			path.join(agentDir, "extensions", "util-questionnaire", "assets", "question-beep.wav"),
-		]) {
-			assert.ok(existsSync(file), `missing asset: ${file}`);
-			const info = parseWav(file);
-			assert.equal(info.format, 1); // PCM
-			assert.equal(info.channels, 2);
-			assert.equal(info.sampleRate, 48000);
-			assert.equal(info.bits, 16);
-			assert.ok(info.seconds > 0.5 && info.seconds < 2.0, `unexpected duration ${info.seconds}`);
+	it("ships five valid 48kHz stereo PCM WAV variants in assets/sounds (source and deployed)", () => {
+		for (const name of SOUND_NAMES) {
+			for (const dir of [soundsDir, path.join(agentDir, "extensions", "util-questionnaire", "assets", "sounds")]) {
+				const file = path.join(dir, `${name}.wav`);
+				assert.ok(existsSync(file), `missing asset: ${file}`);
+				const info = parseWav(file);
+				assert.equal(info.format, 1); // PCM
+				assert.equal(info.channels, 2);
+				assert.equal(info.sampleRate, 48000);
+				assert.equal(info.bits, 16);
+				assert.ok(info.seconds > 0.5 && info.seconds < 2.0, `${name}: unexpected duration ${info.seconds}`);
+			}
 		}
+		assert.ok(settingsCommand(), "settings:util-questionnaire command is registered");
 	});
 
 	it("beeps on trigger, repeats while unfocused, stops on first keypress", async () => {
 		const stubDir = makeStubPlayer();
 		const stubLog = path.join(stubDir, "plays.log");
-		const saved = {
-			PATH: process.env.PATH,
-			STUB_LOG: process.env.STUB_LOG,
-			PI_QUESTIONNAIRE_SOUND: process.env.PI_QUESTIONNAIRE_SOUND,
-			PI_QUESTIONNAIRE_SOUND_INTERVAL_MS: process.env.PI_QUESTIONNAIRE_SOUND_INTERVAL_MS,
-			PI_QUESTIONNAIRE_SOUND_DEBUG: process.env.PI_QUESTIONNAIRE_SOUND_DEBUG,
-		};
+		const saved = { PATH: process.env.PATH, STUB_LOG: process.env.STUB_LOG };
 		try {
 			process.env.PATH = `${stubDir}:${process.env.PATH}`;
 			process.env.STUB_LOG = stubLog;
-			delete process.env.PI_QUESTIONNAIRE_SOUND;
-			process.env.PI_QUESTIONNAIRE_SOUND_INTERVAL_MS = "60";
-			process.env.PI_QUESTIONNAIRE_SOUND_DEBUG = path.join(stubDir, "debug.log");
+			writeSettings("chirp", { intervalMs: 60, debug: path.join(stubDir, "debug.log") });
 			const plays = () =>
 				existsSync(stubLog)
 					? readFileSync(stubLog, "utf8").trim().split("\n").filter(Boolean).length
@@ -450,27 +461,78 @@ describe("attention sound", () => {
 
 			const res = await pending;
 			assert.equal(res.details.cancelled, false);
-			assert.match(readFileSync(stubLog, "utf8"), /question-beep\.wav/, "stub saw wrong asset path");
+			assert.match(readFileSync(stubLog, "utf8"), /sounds\/chirp\.wav/, "stub saw wrong asset path");
+			assert.match(readFileSync(path.join(stubDir, "debug.log"), "utf8"), /"begin"/, "debug log disabled");
 		} finally {
 			restoreEnv(saved);
 		}
 	});
 
-	it("stays silent when PI_QUESTIONNAIRE_SOUND=off", async () => {
+	it("plays the selected variant: /settings:util-questionnaire sound orchestral switches the asset", async () => {
 		const stubDir = makeStubPlayer();
 		const stubLog = path.join(stubDir, "plays.log");
-		const saved = {
-			PATH: process.env.PATH,
-			PI_QUESTIONNAIRE_SOUND: process.env.PI_QUESTIONNAIRE_SOUND,
-		};
+		const saved = { PATH: process.env.PATH, STUB_LOG: process.env.STUB_LOG };
 		try {
 			process.env.PATH = `${stubDir}:${process.env.PATH}`;
-			process.env.PI_QUESTIONNAIRE_SOUND = "off";
+			process.env.STUB_LOG = stubLog;
+			notices.length = 0;
+			await settingsCommand().handler("sound orchestral", silentCtx);
+			assert.ok(notices.some((n) => /sound: orchestral/.test(n.msg)), "command did not confirm the switch");
+
+			const ui = makeCustomUI();
+			const pending = tool.execute("sound-2", singleQ, undefined, undefined, { mode: "tui", ui: ui.ui });
+			await sleep(30);
+			ui.comp.handleInput(K.escape);
+			await pending;
+			assert.match(readFileSync(stubLog, "utf8"), /sounds\/orchestral\.wav/, "stub saw wrong variant");
+		} finally {
+			restoreEnv(saved);
+			writeSettings();
+		}
+	});
+
+	it("stays silent when settings say sound=off", async () => {
+		const stubDir = makeStubPlayer();
+		const stubLog = path.join(stubDir, "plays.log");
+		const saved = { PATH: process.env.PATH, STUB_LOG: process.env.STUB_LOG };
+		try {
+			process.env.PATH = `${stubDir}:${process.env.PATH}`;
+			process.env.STUB_LOG = stubLog;
+			writeSettings("off");
 			const res = await runQuestionnaire(singleQ, [K.escape]);
 			assert.equal(res.details.cancelled, true);
 			assert.ok(!existsSync(stubLog), "stub player was invoked despite sound=off");
 		} finally {
 			restoreEnv(saved);
 		}
+	});
+
+	it("settings command validates, persists, and resets without clobbering unrelated settings", async () => {
+		notices.length = 0;
+		writeFileSync(
+			settingsFile,
+			JSON.stringify({ keepTop: 1, extensionSettings: { keepExt: { v: 2 }, utilQuestionnaire: { sound: "glass", keep: true } } }),
+		);
+
+		await settingsCommand().handler("sound nope", silentCtx);
+		assert.ok(notices.some((n) => n.level === "warning"), "invalid sound accepted");
+		await settingsCommand().handler("interval 5", silentCtx);
+		assert.ok(notices.some((n) => n.level === "warning"), "interval below 50ms accepted");
+
+		await settingsCommand().handler("sound harp", silentCtx);
+		await settingsCommand().handler("interval 2500", silentCtx);
+		const raw = JSON.parse(readFileSync(settingsFile, "utf8"));
+		assert.equal(raw.keepTop, 1);
+		assert.deepEqual(raw.extensionSettings.keepExt, { v: 2 });
+		assert.deepEqual(raw.extensionSettings.utilQuestionnaire, { sound: "harp", keep: true, intervalMs: 2500 });
+
+		await settingsCommand().handler("sound default", silentCtx);
+		assert.equal(JSON.parse(readFileSync(settingsFile, "utf8")).extensionSettings.utilQuestionnaire.sound, "chirp");
+		await settingsCommand().handler("debug off", silentCtx);
+		assert.equal(JSON.parse(readFileSync(settingsFile, "utf8")).extensionSettings.utilQuestionnaire.debug, "");
+
+		await settingsCommand().handler("", silentCtx);
+		assert.ok(notices.some((n) => /sound=chirp/.test(n.msg)), "show did not report current config");
+		writeSettings();
 	});
 });

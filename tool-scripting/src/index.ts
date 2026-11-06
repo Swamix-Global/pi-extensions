@@ -1,10 +1,11 @@
 /** Unified script execution and display-time renderers for current and legacy calls. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
-import { bashAdapter, pythonAdapter, type LanguageAdapter } from "./languages.ts";
+import { hasExtensionSetting, readExtensionSettings, writeExtensionSettings } from "./extension-settings.ts";
+import { bashAdapter, pythonAdapter, type LanguageAdapter, uvBinary } from "./languages.ts";
 import { runScript } from "./runner.ts";
 import { ScriptCallBox, ScriptResultBox } from "./render.ts";
 
@@ -27,6 +28,16 @@ function normalized(args: Record<string, unknown>, adapter: LanguageAdapter): Re
 function enabled(id: string): boolean {
  const s = readExtensionSettings("toolScripting") as Record<string, unknown>;
  return s.enabled !== false && s[id] !== false;
+}
+
+function configuredUvPath(raw: string): string {
+ let value = raw.trim();
+ if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+ if (!value || /[\0\r\n]/.test(value)) throw new Error("uvBinary must be a non-empty executable path.");
+ const file = path.resolve(value);
+ fs.accessSync(file, fs.constants.X_OK);
+ if (!fs.statSync(file).isFile()) throw new Error("uvBinary must point to an executable file.");
+ return file;
 }
 
 export function registerToolScripting(pi: ExtensionAPI) {
@@ -57,13 +68,23 @@ export function registerToolScripting(pi: ExtensionAPI) {
   };
  });
  pi.registerCommand("settings:tool-scripting", {
-  description: "Show or configure script execution: on|off, bash on|off, or python on|off. Does not disable native Bash.",
+  description: "Show or configure script execution: on|off, bash on|off, python on|off, or set/reset uvBinary.",
   handler: async (args, ctx) => {
-   const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
-   if (parts.length === 1 && ["on", "off"].includes(parts[0])) writeExtensionSettings("toolScripting", { enabled: parts[0] === "on" });
-   else if (parts.length === 2 && ["bash", "python"].includes(parts[0]) && ["on", "off"].includes(parts[1])) writeExtensionSettings("toolScripting", { [parts[0]]: parts[1] === "on" });
-   else if (parts.length) { ctx.ui.notify("Usage: /settings:tool-scripting [on|off|bash on|off|python on|off]", "warning"); return; }
-   ctx.ui.notify(`tool-scripting: bash ${enabled("bash") ? "on" : "off"}, python ${enabled("python") ? "on" : "off"}`, "info");
+   const raw = args.trim();
+   const parts = raw.toLowerCase().split(/\s+/).filter(Boolean);
+   const setUv = /^set\s+uvBinary\s+([\s\S]+)$/i.exec(raw);
+   try {
+    if (setUv) writeExtensionSettings("toolScripting", { uvBinary: configuredUvPath(setUv[1]) });
+    else if (/^reset\s+uvBinary$/i.test(raw)) writeExtensionSettings("toolScripting", { uvBinary: undefined });
+    else if (parts.length === 1 && parts[0] === "show") { /* report current values below */ }
+    else if (parts.length === 1 && ["on", "off"].includes(parts[0])) writeExtensionSettings("toolScripting", { enabled: parts[0] === "on" });
+    else if (parts.length === 2 && ["bash", "python"].includes(parts[0]) && ["on", "off"].includes(parts[1])) writeExtensionSettings("toolScripting", { [parts[0]]: parts[1] === "on" });
+    else if (parts.length) { ctx.ui.notify("Usage: /settings:tool-scripting [show|on|off|bash on|off|python on|off|set uvBinary <executable>|reset uvBinary]", "warning"); return; }
+   } catch (err) { ctx.ui.notify(String(err), "error"); return; }
+   const configured = hasExtensionSetting("toolScripting", "uvBinary");
+   const source = configured ? "settings" : process.env.UV_BIN && fs.existsSync(process.env.UV_BIN) ? "UV_BIN" : "automatic";
+   const uv = uvBinary() || "(invalid setting)";
+   ctx.ui.notify(`tool-scripting: bash ${enabled("bash") ? "on" : "off"}, python ${enabled("python") ? "on" : "off"}, uvBinary ${uv} (${source})`, "info");
   },
  });
 }

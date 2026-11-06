@@ -65,6 +65,46 @@ test("registers one script tool, a settings command and legacy renderer", () => 
  assert.ok(scriptTool.parameters.required.includes("title"));
 });
 
+test("uvBinary settings win over UV_BIN, reset restores fallback, and config merge preserves unrelated fields", async () => {
+ const settingsFile = process.env.PI_EXTENSION_SETTINGS_PATH;
+ const original = process.env.UV_BIN;
+ const configuredUv = path.join(workDir, "configured-uv");
+ const legacyUv = path.join(workDir, "legacy-uv");
+ for (const [file, marker] of [[configuredUv, "configured"], [legacyUv, "legacy"]]) {
+  fs.writeFileSync(file, `#!/usr/bin/env bash\nprintf 'uv-${marker}\n'\n`, { mode: 0o755 });
+ }
+ fs.writeFileSync(settingsFile, JSON.stringify({ keepRoot: { value: 1 }, extensionSettings: {
+  keepExtension: { value: 2 }, toolScripting: { enabled: true, keep: "preserved" },
+ } }));
+ process.env.UV_BIN = legacyUv;
+ const command = commands.find((item) => item.name === "settings:tool-scripting").command;
+ const notices = [];
+ const ctx = { ui: { notify: (...args) => notices.push(args) } };
+ try {
+  await command.handler(`set uvBinary "${configuredUv}"`, ctx);
+  let raw = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+  assert.equal(raw.extensionSettings.toolScripting.uvBinary, configuredUv);
+  assert.deepEqual(raw.keepRoot, { value: 1 });
+  assert.deepEqual(raw.extensionSettings.keepExtension, { value: 2 });
+  assert.equal(raw.extensionSettings.toolScripting.keep, "preserved");
+  let result = await execute({ mode: "python", title: "configured uv", script: "print('unused')" });
+  assert.match(result.content[0].text, /uv-configured/);
+
+  await command.handler("set uvBinary /path/that/does/not/exist", ctx);
+  raw = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+  assert.equal(raw.extensionSettings.toolScripting.uvBinary, configuredUv, "invalid values must not replace a valid setting");
+  assert.ok(notices.some(([, level]) => level === "error"), "invalid path is reported");
+
+  await command.handler("reset uvBinary", ctx);
+  raw = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+  assert.equal(Object.hasOwn(raw.extensionSettings.toolScripting, "uvBinary"), false);
+  result = await execute({ mode: "python", title: "legacy uv", script: "print('unused')" });
+  assert.match(result.content[0].text, /uv-legacy/);
+ } finally {
+  if (original === undefined) delete process.env.UV_BIN; else process.env.UV_BIN = original;
+ }
+});
+
 test("bash execute: runs, logs under .pi/scripting/bash, done status", async () => {
  const result = await execute({ mode: "bash", title: "check echo", script: "echo hello-scripting" });
  const text = result.content[0].text;

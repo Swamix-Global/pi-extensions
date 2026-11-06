@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
+import { readExtensionSettings } from "./extension-settings.ts";
 
 export interface PreparedRun {
 	sourceFile: string;
@@ -248,8 +249,12 @@ export const bashAdapter: LanguageAdapter = {
 // python
 // ---------------------------------------------------------------------------
 
-/** Resolve the uv binary: explicit env override, default user install, then PATH. */
+/** Resolve the uv binary: settings, legacy env override, user install, then PATH. */
 export function uvBinary(): string {
+	const settings = readExtensionSettings("toolScripting");
+	if (Object.prototype.hasOwnProperty.call(settings, "uvBinary")) {
+		return typeof settings.uvBinary === "string" ? settings.uvBinary : "";
+	}
 	if (process.env.UV_BIN && fs.existsSync(process.env.UV_BIN)) return process.env.UV_BIN;
 	const user = path.join(os.homedir(), ".local", "bin", "uv");
 	if (fs.existsSync(user)) return user;

@@ -108,6 +108,30 @@ function readExtensionSettings(name: string): Record<string, unknown> {
 	}
 }
 
+/** Atomic merge-patch of one extension's block into settings.json; returns the merged block. */
+function writeExtensionSettings(name: string, patch: Record<string, unknown>): Record<string, unknown> {
+	const file = process.env.PI_EXTENSION_SETTINGS_PATH || path.join(agentDir(), "settings.json");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+	let raw: any = {};
+	try { raw = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {};
+	const section = raw.extensionSettings && typeof raw.extensionSettings === "object" && !Array.isArray(raw.extensionSettings)
+		? raw.extensionSettings
+		: {};
+	const current = section[name];
+	raw.extensionSettings = {
+		...section,
+		[name]: {
+			...(current && typeof current === "object" && !Array.isArray(current) ? current : {}),
+			...patch,
+		},
+	};
+	fs.writeFileSync(tmp, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+	fs.renameSync(tmp, file);
+	return raw.extensionSettings[name];
+}
+
 // ---------------------------------------------------------------------------
 // types
 // ---------------------------------------------------------------------------
@@ -205,6 +229,8 @@ export function decodeJwtClaims(bearer: string): Record<string, unknown> | undef
 }
 
 function authFilePath(): string {
+	const block = readExtensionSettings("quotaHelper");
+	if (typeof block.authFile === "string" && block.authFile.trim()) return path.resolve(block.authFile.trim());
 	return (
 		process.env.PI_QUOTA_HELPER_AUTH ||
 		process.env.PI_ROUTER_AUTH ||
@@ -1408,6 +1434,37 @@ export default function quotaHelper(pi: ExtensionAPI): void {
 			}
 			await poller.refresh();
 			ctx.ui.notify(poller.report() ?? report0, "info");
+		},
+	});
+
+	// Settings-first auth-file path: settings.json:extensionSettings.quotaHelper.authFile
+	// wins; the legacy PI_QUOTA_HELPER_AUTH / PI_ROUTER_AUTH environment paths remain as
+	// fallbacks, then the default <agentDir>/auth.json.
+	pi.registerCommand("settings:quota-helper", {
+		description:
+			"[u] (settings.json:extensionSettings.quotaHelper) Quota auth-file settings — " +
+			"/settings:quota-helper [show|set authFile <path>|reset authFile]",
+		handler: async (args, ctx) => {
+			const input = String(args ?? "").trim();
+			const set = /^set\s+authFile\s+([\s\S]+)$/i.exec(input);
+			if (set) {
+				const value = set[1].trim().replace(/^(["'])(.*)\1$/, "$2");
+				if (!value || /[\0\r\n]/.test(value)) {
+					ctx.ui.notify("authFile must be a non-empty single-line path.", "error");
+					return;
+				}
+				writeExtensionSettings("quotaHelper", { authFile: path.resolve(value) });
+			} else if (/^reset\s+authFile$/i.test(input)) {
+				writeExtensionSettings("quotaHelper", { authFile: undefined });
+			} else if (input && !/^show$/i.test(input)) {
+				ctx.ui.notify("Usage: /settings:quota-helper [show|set authFile <path>|reset authFile]", "warning");
+				return;
+			}
+			const current = readExtensionSettings("quotaHelper");
+			ctx.ui.notify(
+				`quota-helper authFile: ${typeof current.authFile === "string" && current.authFile.trim() ? `${current.authFile} [u]` : "(fallback: env or default auth.json)"} — effective: ${authFilePath()}`,
+				"info",
+			);
 		},
 	});
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import factory, {
@@ -54,21 +54,29 @@ test('child JSON output parsing: usage totals and text extraction', () => {
 });
 
 test('global local model usage counter persists across sessions', () => {
-  const isLocal = isLocalModel('sglang/lfm3-1.7b-fp8', 'explorer');
-  assert.equal(isLocal, true);
-  assert.equal(isLocalModel('openai/gpt-6-luna', 'default'), false);
-  const before = readGlobalLocalUsage();
-  assert.ok(typeof before.totalTokens === 'number');
-  assert.ok(typeof before.totalRuns === 'number');
-  const updated = recordLocalUsage('sglang/lfm3-1.7b-fp8', 'explorer', true, { input: 100, output: 50, cacheRead: 200, cacheWrite: 0, cost: 0, turns: 1 }, 1500);
-  assert.equal(updated.totalRuns, before.totalRuns + 1);
-  assert.equal(updated.totalTokens, before.totalTokens + 350);
-  assert.equal(updated.inputTokens, before.inputTokens + 100);
-  assert.equal(updated.outputTokens, before.outputTokens + 50);
-  assert.equal(updated.cacheReadTokens, before.cacheReadTokens + 200);
-  const reRead = readGlobalLocalUsage();
-  assert.equal(reRead.totalRuns, updated.totalRuns);
-  assert.equal(reRead.totalTokens, updated.totalTokens);
+  const saved = process.env.PI_SUBAGENTX_DATA_DIR;
+  const data = temporary();
+  process.env.PI_SUBAGENTX_DATA_DIR = data;
+  try {
+    const isLocal = isLocalModel('sglang/lfm3-1.7b-fp8', 'explorer');
+    assert.equal(isLocal, true);
+    assert.equal(isLocalModel('openai/gpt-6-luna', 'default'), false);
+    const before = readGlobalLocalUsage();
+    assert.ok(typeof before.totalTokens === 'number');
+    assert.ok(typeof before.totalRuns === 'number');
+    const updated = recordLocalUsage('sglang/lfm3-1.7b-fp8', 'explorer', true, { input: 100, output: 50, cacheRead: 200, cacheWrite: 0, cost: 0, turns: 1 }, 1500);
+    assert.equal(updated.totalRuns, before.totalRuns + 1);
+    assert.equal(updated.totalTokens, before.totalTokens + 350);
+    assert.equal(updated.inputTokens, before.inputTokens + 100);
+    assert.equal(updated.outputTokens, before.outputTokens + 50);
+    assert.equal(updated.cacheReadTokens, before.cacheReadTokens + 200);
+    const reRead = readGlobalLocalUsage();
+    assert.equal(reRead.totalRuns, updated.totalRuns);
+    assert.equal(reRead.totalTokens, updated.totalTokens);
+  } finally {
+    if (saved === undefined) delete process.env.PI_SUBAGENTX_DATA_DIR; else process.env.PI_SUBAGENTX_DATA_DIR = saved;
+    rmSync(data, { recursive: true, force: true });
+  }
 });
 
 test('neat high-aesthetic rendering: call preview and comprehensive bottom stats line', () => {
@@ -144,8 +152,14 @@ test('neat high-aesthetic rendering: call preview and comprehensive bottom stats
 
 test('actual factory IPC, rotation, failover, settings, no run files, concurrent calls and reload', async () => {
   const cwd = temporary(), bin = join(cwd, 'bin'), settings = join(cwd, 'settings.json');
+  const legacyData = join(cwd, 'legacy-data'), configuredData = join(cwd, 'settings-data');
+  const legacyBundle = join(cwd, 'legacy-filemap.js'), configuredBundle = join(cwd, 'settings-filemap.js');
   mkdirSync(bin);
-  writeFileSync(settings, JSON.stringify({ extensionSettings: { subagentx: {} } }));
+  writeFileSync(legacyBundle, '// legacy bundle');
+  writeFileSync(configuredBundle, '// configured bundle');
+  writeFileSync(settings, JSON.stringify({ keepRoot: { value: 1 }, extensionSettings: {
+    keepExtension: { value: 2 }, subagentx: { keep: 'preserved' },
+  } }));
   writeFileSync(join(bin, 'pi'), `#!/usr/bin/env node
 let input=''; process.stdin.on('data', chunk=>input+=chunk); process.stdin.on('end',()=>{
  const args=process.argv.slice(2), provider=args[args.indexOf('--provider')+1];
@@ -154,9 +168,16 @@ let input=''; process.stdin.on('data', chunk=>input+=chunk); process.stdin.on('e
  if(input.includes('EMPTY_RESPONSE'))return;
  process.stdout.write(JSON.stringify({args,input,cwd:process.cwd()}));
 });`, { mode: 0o755 });
-  const saved = { PATH: process.env.PATH, PI_EXTENSION_SETTINGS_PATH: process.env.PI_EXTENSION_SETTINGS_PATH };
+  const saved = {
+    PATH: process.env.PATH,
+    PI_EXTENSION_SETTINGS_PATH: process.env.PI_EXTENSION_SETTINGS_PATH,
+    PI_SUBAGENTX_DATA_DIR: process.env.PI_SUBAGENTX_DATA_DIR,
+    PI_FILEMAP_BUNDLE: process.env.PI_FILEMAP_BUNDLE,
+  };
   process.env.PATH = `${bin}:${process.env.PATH}`;
   process.env.PI_EXTENSION_SETTINGS_PATH = settings;
+  process.env.PI_SUBAGENTX_DATA_DIR = legacyData;
+  process.env.PI_FILEMAP_BUNDLE = legacyBundle;
   try {
     const h = harness();
     const call = (args, signal) => h.tool.execute('test', args, signal, undefined, { cwd });
@@ -184,11 +205,37 @@ let input=''; process.stdin.on('data', chunk=>input+=chunk); process.stdin.on('e
     const cancelled = new AbortController(); cancelled.abort();
     assert.equal((await call({ task: 'never spawn' }, cancelled.signal)).isError, true);
     const before = readFileSync(settings, 'utf8');
-    assert.deepEqual(readdirSync(cwd).sort(), ['bin', 'settings.json']);
+    assert.deepEqual(readdirSync(cwd).sort(), ['bin', 'legacy-data', 'legacy-filemap.js', 'settings-filemap.js', 'settings.json']);
     assert.equal(readFileSync(settings, 'utf8'), before);
     const notices = [];
-    await h.commands['settings:subagentx'].handler('reasoning zai-coding-cn/glm-5.3 low', { ui: { notify: (...args)=>notices.push(args) } });
+    const settingsCmd = h.commands['settings:subagentx'];
+    const commandCtx = { ui: { notify: (...args)=>notices.push(args) } };
+    await settingsCmd.handler('reasoning zai-coding-cn/glm-5.3 low', commandCtx);
     assert.equal(JSON.parse(readFileSync(settings)).extensionSettings.subagentx.modelReasoning[DEFAULT_MODELS[1]], 'low');
+
+    await settingsCmd.handler(`set dataDir "${configuredData}"`, commandCtx);
+    await settingsCmd.handler(`set filemapBundle "${configuredBundle}"`, commandCtx);
+    let config = JSON.parse(readFileSync(settings, 'utf8'));
+    assert.equal(config.extensionSettings.subagentx.dataDir, configuredData);
+    assert.equal(config.extensionSettings.subagentx.filemapBundle, configuredBundle);
+    assert.deepEqual(config.keepRoot, { value: 1 });
+    assert.deepEqual(config.extensionSettings.keepExtension, { value: 2 });
+    assert.equal(config.extensionSettings.subagentx.keep, 'preserved');
+    const mappedArgs = childArgs('explorer', 'sglang/lfm3-1.7b-fp8', 'off');
+    assert.equal(mappedArgs[mappedArgs.indexOf('-e') + 1], configuredBundle, 'settings override PI_FILEMAP_BUNDLE');
+    recordLocalUsage('sglang/lfm3-1.7b-fp8', 'worker', true, { input: 10, output: 2, cacheRead: 3, cacheWrite: 0, cost: 0, turns: 1 }, 100);
+    assert.ok(existsSync(join(configuredData, 'subagentx-local-usage.json')), 'usage follows settings dataDir');
+
+    await settingsCmd.handler('reset filemapBundle', commandCtx);
+    const fallbackArgs = childArgs('explorer', 'sglang/lfm3-1.7b-fp8', 'off');
+    assert.equal(fallbackArgs[fallbackArgs.indexOf('-e') + 1], legacyBundle, 'reset restores PI_FILEMAP_BUNDLE');
+    await settingsCmd.handler('reset dataDir', commandCtx);
+    config = JSON.parse(readFileSync(settings, 'utf8'));
+    assert.equal(Object.hasOwn(config.extensionSettings.subagentx, 'dataDir'), false);
+    assert.equal(Object.hasOwn(config.extensionSettings.subagentx, 'filemapBundle'), false);
+    const beforeLegacyUsage = readGlobalLocalUsage();
+    recordLocalUsage('sglang/lfm3-1.7b-fp8', 'worker', true, { input: 10, output: 2, cacheRead: 3, cacheWrite: 0, cost: 0, turns: 1 }, 100);
+    assert.ok(readGlobalLocalUsage().totalTokens > beforeLegacyUsage.totalTokens, 'reset restores PI_SUBAGENTX_DATA_DIR');
     const loader = (await import('../build/tool-subagentx.js')).default;
     const registers = [];
     const pi = { on() {}, registerCommand() {}, registerTool: tool=>registers.push(tool) };

@@ -98,14 +98,16 @@ Scripts execute with the permissions and environment of the Pi process. The Bash
 ## Settings
 
 ```text
-/settings:tool-scripting
+/settings:tool-scripting show
 /settings:tool-scripting on
 /settings:tool-scripting off
 /settings:tool-scripting bash off
 /settings:tool-scripting python on
+/settings:tool-scripting set uvBinary /absolute/path/to/uv
+/settings:tool-scripting reset uvBinary
 ```
 
-Settings are stored in `extensionSettings.toolScripting`. Disabling a mode rejects execution through `script`; it does not disable Pi's built-in Bash tool or other extensions.
+Settings are stored in `extensionSettings.toolScripting`. `uvBinary` must be an existing executable file and overrides the legacy `UV_BIN` environment fallback, the default `~/.local/bin/uv`, and `PATH`. Resetting it removes the setting and restores that fallback order. Disabling a mode rejects execution through `script`; it does not disable Pi's built-in Bash tool or other extensions.
 
 ## Harness integration
 

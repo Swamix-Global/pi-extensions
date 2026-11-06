@@ -6,7 +6,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { readExtensionSettings, writeExtensionSettings } from "./extension-settings";
+import { hasExtensionSetting, readExtensionSettings, writeExtensionSettings } from "./extension-settings";
 import { runProcess } from "./process";
 export { runProcess } from "./process";
 
@@ -46,8 +46,23 @@ export interface LocalUsageSummary {
   lastUpdated?: string;
 }
 
-// Data directory override for hermetic concurrency tests.
-const dataDir = () => process.env.PI_SUBAGENTX_DATA_DIR || join(homedir(), ".pi", "agent");
+// Legacy environment overrides remain as fallbacks when no settings value is set.
+const dataDir = () => {
+  const settings = readExtensionSettings("subagentx");
+  if (hasExtensionSetting("subagentx", "dataDir")) {
+    return typeof settings.dataDir === "string" && settings.dataDir.trim()
+      ? resolve(settings.dataDir)
+      : join(homedir(), ".pi", "agent");
+  }
+  return process.env.PI_SUBAGENTX_DATA_DIR || join(homedir(), ".pi", "agent");
+};
+
+function configuredPath(raw: string): string {
+  let value = raw.trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+  if (!value || /[\0\r\n]/.test(value)) throw new Error("Path must be a non-empty single-line value.");
+  return resolve(value);
+}
 const LOCAL_USAGE_FILE = () => join(dataDir(), "subagentx-local-usage.json");
 
 // util-quota-helper (sibling extension) owns the footer status row while it is live:
@@ -241,6 +256,12 @@ function invocation(args: string[]): { command: string; args: string[] } {
 // Optional filemap tool bundle (tool-filemap) injected into children via explicit -e;
 // resolved beside this deployment's sibling package, with env + agent-dir fallbacks.
 export function filemapBundle(): string | null {
+  const settings = readExtensionSettings("subagentx");
+  if (hasExtensionSetting("subagentx", "filemapBundle")) {
+    return typeof settings.filemapBundle === "string" && settings.filemapBundle.trim()
+      ? resolve(settings.filemapBundle)
+      : null;
+  }
   const env = process.env.PI_FILEMAP_BUNDLE;
   if (env) return env;
   let here = "";
@@ -576,12 +597,30 @@ export default function subagentx(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("settings:subagentx", {
-    description: "Subagent profiles: show | models <provider/model ...> | model <profile> <ref|default> | reasoning <ref> <level|default>",
+    description: "Subagent profiles and paths: show | models | model | reasoning | set/reset dataDir or filemapBundle",
     async handler(raw, ctx) {
-      const [action, key, ...rest] = raw.trim().split(/\s+/);
+      const input = raw.trim();
+      const [action, key, ...rest] = input.split(/\s+/);
+      const pathAction = /^(set|reset)\s+(dataDir|filemapBundle)(?:\s+([\s\S]*))?$/i.exec(input);
       const settings = readExtensionSettings("subagentx");
       try {
-        if (action === "models") {
+        if (pathAction) {
+          const operation = pathAction[1].toLowerCase();
+          const option = pathAction[2].toLowerCase() as "datadir" | "filemapbundle";
+          const field = option === "datadir" ? "dataDir" : "filemapBundle";
+          if (operation === "reset") {
+            if (pathAction[3]?.trim()) throw new Error(`Usage: reset ${field}`);
+            writeExtensionSettings("subagentx", { [field]: undefined });
+          } else {
+            const value = configuredPath(pathAction[3] ?? "");
+            if (field === "filemapBundle") {
+              if (!existsSync(value) || !statSync(value).isFile()) throw new Error("filemapBundle must point to an existing file.");
+            } else if (existsSync(value) && !statSync(value).isDirectory()) {
+              throw new Error("dataDir must point to a directory.");
+            }
+            writeExtensionSettings("subagentx", { [field]: value });
+          }
+        } else if (action === "models") {
           const pool = [key, ...rest].filter(Boolean).map(validateModel);
           if (!pool.length) throw new Error("Supply at least one provider/model.");
           writeExtensionSettings("subagentx", { subagentModels: pool });
@@ -598,7 +637,7 @@ export default function subagentx(pi: ExtensionAPI) {
           else if (LEVELS.includes(rest[0])) map[key] = rest[0];
           else throw new Error(`Reasoning must be ${LEVELS.join("|")}|default.`);
           writeExtensionSettings("subagentx", { modelReasoning: map });
-        } else if (action && action !== "show") throw new Error("Use show, models, model or reasoning.");
+        } else if (action && action !== "show") throw new Error("Use show, models, model, reasoning, set or reset.");
         const current = readExtensionSettings("subagentx");
         const globalLocal = readGlobalLocalUsage();
         ctx.ui.notify(JSON.stringify({
@@ -606,6 +645,7 @@ export default function subagentx(pi: ExtensionAPI) {
           pool: current.subagentModels ?? DEFAULT_MODELS,
           profileModels: current.profileModels ?? {},
           reasoning: { ...REASONING, ...(current.modelReasoning as object) },
+          paths: { dataDir: dataDir(), filemapBundle: filemapBundle() ?? null },
           globalLocalUsage: globalLocal,
         }, null, 2), "info");
       } catch (err) { ctx.ui.notify(String(err), "error"); }
