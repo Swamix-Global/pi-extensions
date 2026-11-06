@@ -23,6 +23,11 @@ for package in "${packages[@]}"; do
   install -v -m 644 "$source_dir/$package/package.json" "$target/package.json"
   rm -rf "$target/build"
   cp -a "$source_dir/$package/build" "$target/build"
+  # Ship static assets (e.g. util-questionnaire attention sound) next to the bundle.
+  if [ -d "$source_dir/$package/assets" ]; then
+    rm -rf "$target/assets"
+    cp -a "$source_dir/$package/assets" "$target/assets"
+  fi
   # Purge stale bundles from earlier package names so only the manifest entry remains.
   entry="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pi"]["extensions"][0])' "$target/package.json")"
   find "$target/build" -maxdepth 1 -type f ! -name "$(basename -- "$entry")" -print -delete

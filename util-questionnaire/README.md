@@ -36,6 +36,22 @@ A tab bar tracks answered (`■`) vs. unanswered (`□`) questions; the final
 question, and submits once everything is answered. Non-TUI sessions return a
 clear error so the model falls back to asking in prose.
 
+## Attention sound
+
+When a question is triggered, a short synthesized WAV
+(`assets/question-beep.wav` — a smooth futuristic rising chirp with harmonic
+shimmer and stereo echo tails, 1.15s @ 48kHz) plays through the native audio
+stack: `paplay` → `aplay` → `ffplay` (on WSLg, PulseAudio routes to the
+Windows host speakers). The beep repeats every 10 seconds while the question
+is unfocused; the first keypress or questionnaire completion silences it.
+
+| Environment variable | Effect |
+| --- | --- |
+| `PI_QUESTIONNAIRE_SOUND=off` | disable the attention sound |
+| `PI_QUESTIONNAIRE_SOUND_WAV=<path>` | override the WAV asset location |
+| `PI_QUESTIONNAIRE_SOUND_INTERVAL_MS=<n>` | override the 10s repeat interval |
+| `PI_QUESTIONNAIRE_SOUND_DEBUG=<file>` | append JSONL play events for diagnosis |
+
 ## Build & deploy
 
 ```bash

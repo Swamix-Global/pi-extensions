@@ -4,10 +4,10 @@
 // free-text "other" answers, review-page jump-back, cancel, and renderer
 // smoke checks at several widths. Hermetic and offline.
 import { createJiti } from "/usr/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import * as os from "node:os";
 import * as path from "node:path";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, mkdtempSync, chmodSync, writeFileSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
@@ -37,6 +37,10 @@ const { visibleWidth } = await jiti.import(path.join(piDeps, "pi-tui"));
 const tools = {};
 mod.default({ registerTool: (t) => (tools[t.name] = t) });
 const tool = tools.questionnaire;
+
+// Keep the existing flow tests silent: the attention beep fires on every
+// TUI-mode execute; sound behavior gets its own dedicated suite below.
+process.env.PI_QUESTIONNAIRE_SOUND = "off";
 
 // --- fake theme / keyboard / tui ----------------------------------------------
 
@@ -341,5 +345,132 @@ describe("renderers", () => {
 		}
 		drive(ui, [K.escape]);
 		pending.catch(() => {});
+	});
+});
+
+// --- attention sound --------------------------------------------------------------
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function makeStubPlayer() {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "q-stub-"));
+	const bin = path.join(dir, "paplay");
+	writeFileSync(bin, `#!/bin/sh\necho "$@" >> "$STUB_LOG"\n`);
+	chmodSync(bin, 0o755);
+	return dir;
+}
+
+function parseWav(file) {
+	const buf = readFileSync(file);
+	assert.equal(buf.subarray(0, 4).toString(), "RIFF");
+	assert.equal(buf.subarray(8, 12).toString(), "WAVE");
+	const info = {};
+	let off = 12;
+	while (off + 8 <= buf.length) {
+		const id = buf.subarray(off, off + 4).toString();
+		const size = buf.readUInt32LE(off + 4);
+		if (id === "fmt ") {
+			info.format = buf.readUInt16LE(off + 8);
+			info.channels = buf.readUInt16LE(off + 10);
+			info.sampleRate = buf.readUInt32LE(off + 12);
+			info.bits = buf.readUInt16LE(off + 22);
+		} else if (id === "data") {
+			info.dataBytes = size;
+		}
+		off += 8 + size + (size % 2);
+	}
+	info.seconds = info.dataBytes / (info.sampleRate * info.channels * (info.bits / 8));
+	return info;
+}
+
+function restoreEnv(saved) {
+	for (const [key, value] of Object.entries(saved)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+}
+
+describe("attention sound", () => {
+	const srcWav = path.resolve(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"util-questionnaire",
+		"assets",
+		"question-beep.wav",
+	);
+
+	it("ships a valid 48kHz stereo PCM WAV next to the bundle (source and deployed)", () => {
+		for (const file of [
+			srcWav,
+			path.join(agentDir, "extensions", "util-questionnaire", "assets", "question-beep.wav"),
+		]) {
+			assert.ok(existsSync(file), `missing asset: ${file}`);
+			const info = parseWav(file);
+			assert.equal(info.format, 1); // PCM
+			assert.equal(info.channels, 2);
+			assert.equal(info.sampleRate, 48000);
+			assert.equal(info.bits, 16);
+			assert.ok(info.seconds > 0.5 && info.seconds < 2.0, `unexpected duration ${info.seconds}`);
+		}
+	});
+
+	it("beeps on trigger, repeats while unfocused, stops on first keypress", async () => {
+		const stubDir = makeStubPlayer();
+		const stubLog = path.join(stubDir, "plays.log");
+		const saved = {
+			PATH: process.env.PATH,
+			STUB_LOG: process.env.STUB_LOG,
+			PI_QUESTIONNAIRE_SOUND: process.env.PI_QUESTIONNAIRE_SOUND,
+			PI_QUESTIONNAIRE_SOUND_INTERVAL_MS: process.env.PI_QUESTIONNAIRE_SOUND_INTERVAL_MS,
+			PI_QUESTIONNAIRE_SOUND_DEBUG: process.env.PI_QUESTIONNAIRE_SOUND_DEBUG,
+		};
+		try {
+			process.env.PATH = `${stubDir}:${process.env.PATH}`;
+			process.env.STUB_LOG = stubLog;
+			delete process.env.PI_QUESTIONNAIRE_SOUND;
+			process.env.PI_QUESTIONNAIRE_SOUND_INTERVAL_MS = "60";
+			process.env.PI_QUESTIONNAIRE_SOUND_DEBUG = path.join(stubDir, "debug.log");
+			const plays = () =>
+				existsSync(stubLog)
+					? readFileSync(stubLog, "utf8").trim().split("\n").filter(Boolean).length
+					: 0;
+
+			const ui = makeCustomUI();
+			const pending = tool.execute("sound-1", singleQ, undefined, undefined, { mode: "tui", ui: ui.ui });
+			await sleep(30);
+			const first = plays();
+			assert.ok(first >= 1, "no beep on trigger");
+			await sleep(100);
+			assert.ok(plays() >= first + 1, "no repeat beep while unfocused");
+
+			ui.comp.handleInput("1"); // focus + answer in one key
+			const after = plays();
+			await sleep(150);
+			assert.equal(plays(), after, "kept beeping after focus");
+
+			const res = await pending;
+			assert.equal(res.details.cancelled, false);
+			assert.match(readFileSync(stubLog, "utf8"), /question-beep\.wav/, "stub saw wrong asset path");
+		} finally {
+			restoreEnv(saved);
+		}
+	});
+
+	it("stays silent when PI_QUESTIONNAIRE_SOUND=off", async () => {
+		const stubDir = makeStubPlayer();
+		const stubLog = path.join(stubDir, "plays.log");
+		const saved = {
+			PATH: process.env.PATH,
+			PI_QUESTIONNAIRE_SOUND: process.env.PI_QUESTIONNAIRE_SOUND,
+		};
+		try {
+			process.env.PATH = `${stubDir}:${process.env.PATH}`;
+			process.env.PI_QUESTIONNAIRE_SOUND = "off";
+			const res = await runQuestionnaire(singleQ, [K.escape]);
+			assert.equal(res.details.cancelled, true);
+			assert.ok(!existsSync(stubLog), "stub player was invoked despite sound=off");
+		} finally {
+			restoreEnv(saved);
+		}
 	});
 });

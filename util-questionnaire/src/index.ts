@@ -21,6 +21,8 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+import { createAttentionLoop } from "./sound";
+
 const PAGE_SIZE = 9; // digits 1-9 address every visible option
 const MAX_QUESTIONS = 10;
 const MAX_OPTIONS = 60;
@@ -156,7 +158,14 @@ export default function questionnaire(pi: ExtensionAPI) {
 			const isMulti = questions.length > 1;
 			const reviewRow = questions.length; // index of the submit row on the review page
 
-			const result = await ctx.ui.custom<QuestionnaireDetails>((tui, theme, _kb, done) => {
+			// Attention sound: beep as soon as the question appears, repeat every
+			// 10s while the user hasn't focused the UI; stopped on first keypress
+			// or when the questionnaire completes.
+			const attention = createAttentionLoop();
+
+			let result: QuestionnaireDetails;
+			try {
+				result = await ctx.ui.custom<QuestionnaireDetails>((tui, theme, _kb, done) => {
 				// state
 				let qIdx = 0;
 				let optIdx = 0;
@@ -167,6 +176,16 @@ export default function questionnaire(pi: ExtensionAPI) {
 				const answers = new Map<string, Answer>();
 				const toggles = new Map<string, Set<number>>(); // per question: selected global option indices
 				const customs = new Map<string, string[]>(); // per question: free-text drafts
+
+				// The first keypress anywhere means the user is looking at the
+				// question — silence the repeating attention beep.
+				let focused = false;
+				const markFocused = () => {
+					if (!focused) {
+						focused = true;
+						attention.stop();
+					}
+				};
 
 				const editorTheme: EditorTheme = {
 					borderColor: (s) => theme.fg("accent", s),
@@ -603,9 +622,15 @@ export default function questionnaire(pi: ExtensionAPI) {
 					invalidate: () => {
 						cachedLines = undefined;
 					},
-					handleInput,
+					handleInput: (data: string) => {
+						markFocused();
+						handleInput(data);
+					},
 				};
-			});
+				});
+			} finally {
+				attention.stop();
+			}
 
 			if (result.cancelled) {
 				return {
@@ -620,20 +645,43 @@ export default function questionnaire(pi: ExtensionAPI) {
 			}
 
 			const byId = new Map(result.answers.map((a) => [a.id, a]));
+			// Self-contained transcript: full question text + every option + the
+			// complete answer, so the model never loses intent to summarization and
+			// cannot re-ask the same questions.
 			const body = questions
-				.map((question) => {
+				.map((question, qi) => {
+					const options = question.options
+						.map((o, oi) => {
+							let line = `  ${oi + 1}. ${o.label}`;
+							if (o.value && o.value !== o.label) line += ` (value: ${o.value})`;
+							if (o.description) line += ` — ${o.description}`;
+							return line;
+						})
+						.join("\n");
+					const multi = question.multi ? " [multi-select allowed]" : "";
 					const a = byId.get(question.id);
-					if (!a) return `${question.label}: (no answer)`;
-					const custom = a.custom.length ? ` · custom: ${a.custom.map((t) => `"${t}"`).join(", ")}` : "";
-					return `${question.label}: ${a.labels.join("; ")} (values: ${a.values.join("; ")})${custom}`;
+					if (!a) {
+						return `Q${qi + 1} [${question.label}]: ${question.prompt}${multi}\nOptions:\n${options}\nAnswer: (no answer)`;
+					}
+					const picked = a.labels
+						.map((l, i) => {
+							const idx = a.indices[i];
+							const opt = idx ? question.options[idx - 1] : undefined;
+							const value = opt?.value && opt.value !== opt.label ? ` (value: ${opt.value})` : "";
+							return idx ? `${idx}. ${l}${value}` : `${l}${value}`;
+						})
+						.join("; ");
+					const typed = a.custom.length ? `custom typed: ${a.custom.map((t) => `"${t}"`).join(", ")}` : "";
+					const answer = [picked, typed].filter(Boolean).join("; ") || "(no answer)";
+					return `Q${qi + 1} [${question.label}]: ${question.prompt}${multi}\nOptions:\n${options}\nAnswer: ${answer}`;
 				})
-				.join("\n");
+				.join("\n\n");
 
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `User answered ${result.answers.length}/${questions.length} questions:\n${body}`,
+						text: `User answered ${result.answers.length}/${questions.length} questions. Full transcript:\n${body}`,
 					},
 				],
 				details: result,
