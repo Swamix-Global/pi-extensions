@@ -169,6 +169,6 @@ The implementation and automated tests discussed here were verified in a develop
 
 - Browse [Swamix Global AI Solutions](https://swamix.com/) and the [engineering blog](https://swamix.com/blog/).
 - Explore the [Pi extensions repository](https://github.com/Swamix-Global/pi-extensions), [Filemap source](https://github.com/Swamix-Global/pi-extensions/tree/main/tool-filemap), and [questionnaire documentation](https://github.com/Swamix-Global/pi-extensions/tree/main/util-questionnaire).
-- Continue with [Filemap on the Swamix blog](https://swamix.com/blog/filemap/) and the repository's [engineering article collection](https://github.com/Swamix-Global/pi-extensions/tree/main/docs/blog).
+- Read the [published version of this article](https://swamix.com/blog/branching-questionnaires-filemap-agent-workflows/), explore [Filemap on the Swamix blog](https://swamix.com/blog/pi-filemap-git-aware-repo-maps/), and browse the repository's [engineering article collection](https://github.com/Swamix-Global/pi-extensions/tree/main/docs/blog).
 
 *Written by Swamix Global AI Solutions. Examples describe the implementation and limitations observed during development; verify behavior against your installed version.*
